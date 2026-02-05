@@ -91,6 +91,17 @@ Config.GangData = {
             'WORLD_HUMAN_SMOKING'
         },
         combatStyle = 'aggressive'
+    },
+    ['cartel'] = {
+        models = { 'g_m_m_mexboss_01', 'g_m_m_mexboss_02', 'g_m_y_mexgoon_01', 'g_m_y_mexgoon_02' },
+        vehicles = { 'dubsta2', 'cavalcade2', 'baller3' },
+        weapons = { 'WEAPON_ASSAULTRIFLE', 'WEAPON_COMBATPISTOL', 'WEAPON_SMG', 'WEAPON_MACHETE' },
+        scenarios = {
+            'WORLD_HUMAN_GUARD_STAND',
+            'WORLD_HUMAN_SMOKING',
+            'WORLD_HUMAN_STAND_MOBILE'
+        },
+        combatStyle = 'balanced'
     }
 }
 
