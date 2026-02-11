@@ -1,16 +1,16 @@
 -- ============================================
 -- GANG AMBIENT AI - Client
 -- Handles NPC spawning, combat AI, and throttling
+-- Uses GangBridge for gang script abstraction
 -- ============================================
 
 local QBCore = exports['qb-core']:GetCoreObject()
 
 -- State tracking
 local spawnedNPCs = {}          -- All spawned NPCs { entity, gangName, spawnTime }
-local playerGang = nil          -- Player's gang from rcore
+local playerGang = nil          -- Player's gang name (lowercase)
 local playerRelationshipHash = nil
-local nearbyTerritories = {}    -- Cached nearby territory data
-local lastSpawnTime = {}        -- Cooldown tracking per territory
+local lastSpawnTime = {}        -- Cooldown tracking per zone name
 local inCombat = false          -- Is player in combat
 
 -- ============================================
@@ -26,7 +26,6 @@ local function GetOrCreateGangRelationship(gangName)
         return gangRelationshipGroups[gangName]
     end
 
-    -- Create unique relationship group for this gang
     local groupName = 'GANG_' .. string.upper(gangName)
     local groupHash = GetHashKey(groupName)
 
@@ -45,7 +44,6 @@ local function SetupGangRelationships()
         GetOrCreateGangRelationship(gangName)
     end
 
-    -- Set up relationships between all gangs
     for _, gang1 in ipairs(gangs) do
         local hash1 = gangRelationshipGroups[gang1]
 
@@ -53,18 +51,13 @@ local function SetupGangRelationships()
             local hash2 = gangRelationshipGroups[gang2]
 
             if gang1 == gang2 then
-                -- Same gang = respect
                 SetRelationshipBetweenGroups(Config.Relationships.defaultToSameGang, hash1, hash2)
             else
-                -- Different gangs = hate
                 SetRelationshipBetweenGroups(Config.Relationships.defaultToRivals, hash1, hash2)
             end
         end
 
-        -- Relationship to police
         SetRelationshipBetweenGroups(Config.Relationships.defaultToPolice, hash1, GetHashKey('COP'))
-
-        -- Relationship to player (initially neutral, updated when player gang is known)
         SetRelationshipBetweenGroups(1, hash1, GetHashKey('PLAYER'))
     end
 
@@ -85,13 +78,11 @@ local function GetOptimalTickRate()
     local ped = PlayerPedId()
     local coords = GetEntityCoords(ped)
 
-    -- Check if player is in combat
     if IsPedInMeleeCombat(ped) or IsPedShooting(ped) then
         inCombat = true
         return Config.AmbientSpawning.tickRates.combat
     end
 
-    -- Check distance to nearest gang NPC
     local nearestNPCDist = 999.0
     for _, npcData in pairs(spawnedNPCs) do
         if DoesEntityExist(npcData.entity) then
@@ -123,7 +114,6 @@ end
 RegisterNetEvent('gangai:client:setPlayerRelationship', function(gang)
     playerGang = gang
 
-    -- Ensure relationships are set up
     SetupGangRelationships()
 
     if gang and gangRelationshipGroups[gang] then
@@ -131,7 +121,6 @@ RegisterNetEvent('gangai:client:setPlayerRelationship', function(gang)
         playerRelationshipHash = gangRelationshipGroups[gang]
         SetPedRelationshipGroupHash(ped, playerRelationshipHash)
 
-        -- Update relationships: player's gang is friendly, others are enemies
         for gangName, hash in pairs(gangRelationshipGroups) do
             if gangName == gang then
                 SetRelationshipBetweenGroups(Config.Relationships.defaultToSameGang, hash, GetHashKey('PLAYER'))
@@ -146,13 +135,29 @@ RegisterNetEvent('gangai:client:setPlayerRelationship', function(gang)
             print('[GangAI] Player relationship set to gang: ' .. gang)
         end
     else
+        -- Player is not in a gang — set neutral to all gangs
         playerRelationshipHash = nil
+        for _, hash in pairs(gangRelationshipGroups) do
+            SetRelationshipBetweenGroups(Config.Relationships.defaultToPlayer, hash, GetHashKey('PLAYER'))
+            SetRelationshipBetweenGroups(Config.Relationships.defaultToPlayer, GetHashKey('PLAYER'), hash)
+        end
     end
 end)
 
 -- Sync relationship on spawn/load
 AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
     Wait(2000)
+    -- Try client-side bridge first
+    if GangBridge and GangBridge.GetPlayerGangClient then
+        local gangData = GangBridge.GetPlayerGangClient()
+        if gangData then
+            local rawTag = type(gangData) == 'table' and (gangData.tag or gangData.name) or gangData
+            if rawTag then
+                playerGang = GangBridge.ResolveGangName(rawTag)
+            end
+        end
+    end
+    -- Also sync from server (authoritative)
     TriggerServerEvent('gangai:server:syncPlayerRelationship')
 end)
 
@@ -167,35 +172,28 @@ end)
 local function ApplyCombatAI(ped, gangData)
     local style = Config.CombatAI.styles[gangData.combatStyle] or Config.CombatAI.styles.balanced
 
-    -- Base combat attributes
     SetPedCombatMovement(ped, style.combatMovement)
     SetPedCombatRange(ped, style.combatRange)
-    SetPedCombatAbility(ped, 2) -- Professional
+    SetPedCombatAbility(ped, 2)
 
-    -- Accuracy
     local accuracy = math.random(Config.CombatAI.accuracy.min, Config.CombatAI.accuracy.max)
     SetPedAccuracy(ped, accuracy)
 
-    -- Perception
     SetPedSeeingRange(ped, 100.0)
     SetPedHearingRange(ped, 80.0)
     SetPedAlertness(ped, 3)
 
-    -- Combat attributes
-    SetPedCombatAttributes(ped, 46, true)  -- Can fight armed peds on foot
-    SetPedCombatAttributes(ped, 5, true)   -- Can attack you
-    SetPedCombatAttributes(ped, 0, true)   -- Can use cover
+    SetPedCombatAttributes(ped, 46, true)
+    SetPedCombatAttributes(ped, 5, true)
+    SetPedCombatAttributes(ped, 0, true)
 
-    -- Cover system
     if Config.CombatAI.enableCoverSystem and style.useCover then
-        SetPedCombatAttributes(ped, 1, true)  -- Will use cover
-        SetPedCombatAttributes(ped, 2, true)  -- Can do drivebys
+        SetPedCombatAttributes(ped, 1, true)
+        SetPedCombatAttributes(ped, 2, true)
     end
 
-    -- Flee behavior
     if Config.CombatAI.enableRetreat and style.fleeHealthThreshold > 0 then
-        SetPedFleeAttributes(ped, 0, false) -- Don't flee immediately
-        -- Monitor health for retreat
+        SetPedFleeAttributes(ped, 0, false)
         CreateThread(function()
             while DoesEntityExist(ped) and not IsEntityDead(ped) do
                 Wait(1000)
@@ -225,13 +223,11 @@ local function TriggerRecruitment(ped, gangName)
     local pedCoords = GetEntityCoords(ped)
     local recruits = 0
 
-    -- Find nearby peds to recruit
     for _, npcData in pairs(spawnedNPCs) do
         if npcData.gangName == gangName and DoesEntityExist(npcData.entity) and npcData.entity ~= ped then
             local dist = #(pedCoords - GetEntityCoords(npcData.entity))
 
             if dist < Config.CombatAI.recruitmentRadius then
-                -- Make this NPC join the fight
                 if not IsPedInCombat(npcData.entity) then
                     TaskCombatHatedTargetsAroundPed(npcData.entity, 100.0, 0)
                     recruits = recruits + 1
@@ -254,13 +250,10 @@ end
 -- ============================================
 
 local function SpawnGangNPC(gangName, gangData, coords)
-    -- Ensure relationships are set up first
     SetupGangRelationships()
 
-    -- Get relationship hash for this gang (created client-side)
     local relationshipHash = GetOrCreateGangRelationship(gangName)
 
-    -- Select random model
     local modelName = gangData.models[math.random(#gangData.models)]
     local modelHash = GetHashKey(modelName)
 
@@ -285,18 +278,15 @@ local function SpawnGangNPC(gangName, gangData, coords)
     local spawnY = coords.y + dist * math.sin(angle)
     local spawnZ = coords.z
 
-    -- Get ground Z
-    local foundGround, groundZ = GetGroundZFor_3dCoord(spawnX, spawnY, spawnZ + 10.0, false)
-    if foundGround then
-        spawnZ = groundZ
-    end
-
-    local ped = CreatePed(4, modelHash, spawnX, spawnY, spawnZ, math.random(0, 360) + 0.0, true, true)
+    -- Spawn ped and use PlaceOnGroundProperly for correct Z
+    local ped = CreatePed(4, modelHash, spawnX, spawnY, spawnZ + 1.0, math.random(0, 360) + 0.0, true, true)
 
     if not DoesEntityExist(ped) then
         SetModelAsNoLongerNeeded(modelHash)
         return nil
     end
+
+    PlaceOnGroundProperly(ped)
 
     -- Set relationship group
     SetPedRelationshipGroupHash(ped, relationshipHash)
@@ -316,14 +306,13 @@ local function SpawnGangNPC(gangName, gangData, coords)
         TaskStartScenarioInPlace(ped, scenario, 0, true)
     end
 
-    -- Set as enemy to player (if different gang)
-    if playerGang ~= gangName then
+    -- Only mark as enemy if player is in a DIFFERENT gang (not if player has no gang)
+    if playerGang and playerGang ~= gangName then
         SetPedAsEnemy(ped, true)
     end
 
     SetModelAsNoLongerNeeded(modelHash)
 
-    -- Track this NPC
     local npcData = {
         entity = ped,
         gangName = gangName,
@@ -367,13 +356,11 @@ RegisterNetEvent('gangai:client:spawnWarReinforcements', function(data)
     local playerCoords = GetEntityCoords(PlayerPedId())
     local dist = #(playerCoords - vector3(data.coords.x, data.coords.y, data.coords.z))
 
-    -- Only spawn if player is nearby
     if dist > 300.0 then return end
 
     for i = 1, data.count do
         local ped = SpawnGangNPC(data.gangName, data.gangData, data.coords)
         if ped then
-            -- War NPCs are immediately aggressive
             TaskCombatHatedTargetsAroundPed(ped, 150.0, 0)
             Wait(100)
         end
@@ -412,18 +399,14 @@ CreateThread(function()
 
         local ped = PlayerPedId()
 
-        -- Check if player is shooting at gang NPCs
         if IsPedShooting(ped) then
             local _, entity = GetEntityPlayerIsFreeAimingAt(PlayerId())
 
             if DoesEntityExist(entity) and not IsPedAPlayer(entity) then
-                -- Check if this is one of our spawned NPCs
                 local npcData = spawnedNPCs[entity]
                 if npcData then
-                    -- Trigger recruitment for that gang
                     TriggerRecruitment(entity, npcData.gangName)
 
-                    -- Notify police
                     local coords = GetEntityCoords(entity)
                     TriggerServerEvent('gangai:server:notifyPolice', 'Shots fired in gang territory!', coords)
                 end
@@ -434,11 +417,11 @@ end)
 
 -- ============================================
 -- AMBIENT SPAWNING LOOP
--- Uses rcore territories when available
+-- Uses GangBridge for territory detection
 -- ============================================
 
 CreateThread(function()
-    Wait(5000) -- Initial delay
+    Wait(5000) -- Initial delay for bridge to initialize
 
     while true do
         local tickRate = GetOptimalTickRate()
@@ -449,49 +432,44 @@ CreateThread(function()
             goto continue
         end
 
+        -- Wait for bridge to be ready
+        if not GangBridge or not GangBridge._adapter then
+            Wait(2000)
+            goto continue
+        end
+
         local ped = PlayerPedId()
         local coords = GetEntityCoords(ped)
 
-        -- Try to get territories from rcore
-        local territories = {}
+        -- Use bridge to detect if player is in a gang territory
+        local zone = GangBridge.GetZoneAtPosition(coords)
 
-        local rcoreAvailable = GetResourceState(Config.Integration.rcoreResource) == 'started'
-        if rcoreAvailable then
-            local success, zones = pcall(function()
-                return exports[Config.Integration.rcoreResource]:GetNearbyZones(coords, Config.AmbientSpawning.playerTriggerDistance)
-            end)
+        if zone and zone.owner then
+            local gangData = Config.GangData[zone.owner]
 
-            if success and zones then
-                for _, zone in ipairs(zones) do
-                    if zone.owner and zone.owner ~= 'none' then
-                        territories[#territories + 1] = {
-                            gangName = zone.owner:lower(),
-                            coords = zone.coords,
-                            zoneId = zone.id
-                        }
-                    end
-                end
-            end
-        end
-
-        -- Process each territory
-        for _, territory in ipairs(territories) do
-            local gangData = Config.GangData[territory.gangName]
             if gangData then
-                -- Check cooldown
-                local lastSpawn = lastSpawnTime[territory.zoneId] or 0
+                -- Check cooldown per zone
+                local lastSpawn = lastSpawnTime[zone.name] or 0
                 if GetGameTimer() - lastSpawn > Config.AmbientSpawning.respawnCooldown then
 
                     -- Determine heat level
                     local heatLevel = 'peaceful'
                     if inCombat then
                         heatLevel = 'wartime'
+                    elseif GangBridge.IsZoneAtWar and GangBridge.IsZoneAtWar(zone.name) then
+                        heatLevel = 'wartime'
                     end
 
-                    -- Request spawn from server
-                    TriggerServerEvent('gangai:server:requestAmbientSpawn', territory.gangName, territory.coords, heatLevel)
-                    lastSpawnTime[territory.zoneId] = GetGameTimer()
+                    -- Request spawn from server (send zone name + center for server-side ownership verification)
+                    TriggerServerEvent('gangai:server:requestAmbientSpawn', zone.name, zone.center, heatLevel)
+                    lastSpawnTime[zone.name] = GetGameTimer()
+
+                    if Config.Debug then
+                        print('[GangAI] Zone detected: ' .. zone.name .. ' owned by ' .. zone.owner .. ' (heat: ' .. heatLevel .. ')')
+                    end
                 end
+            elseif Config.Debug then
+                print('[GangAI] Zone ' .. zone.name .. ' owner "' .. tostring(zone.owner) .. '" not in Config.GangData')
             end
         end
 
@@ -517,14 +495,12 @@ CreateThread(function()
                 local npcCoords = GetEntityCoords(npcPed)
                 local dist = #(coords - npcCoords)
 
-                -- Despawn if too far and not in combat
                 if dist > Config.AmbientSpawning.despawnDistance and not IsPedInCombat(npcPed) then
                     DeleteEntity(npcPed)
                     spawnedNPCs[npcPed] = nil
                     cleaned = cleaned + 1
                 end
             else
-                -- Entity no longer exists, clean up tracking
                 spawnedNPCs[npcPed] = nil
                 cleaned = cleaned + 1
             end
@@ -546,14 +522,25 @@ end)
 CreateThread(function()
     Wait(3000)
 
-    -- Setup relationship groups (client-side only)
     SetupGangRelationships()
 
-    -- Sync player relationship
+    -- Try client-side bridge for player gang
+    if GangBridge and GangBridge.GetPlayerGangClient then
+        local gangData = GangBridge.GetPlayerGangClient()
+        if gangData then
+            local rawTag = type(gangData) == 'table' and (gangData.tag or gangData.name) or gangData
+            if rawTag then
+                playerGang = GangBridge.ResolveGangName(rawTag)
+            end
+        end
+    end
+
+    -- Sync from server (authoritative)
     TriggerServerEvent('gangai:server:syncPlayerRelationship')
 
     if Config.Debug then
         print('[GangAI] Client initialized')
+        print('[GangAI] Bridge adapter: ' .. tostring(GangBridge and GangBridge._adapter or 'not ready'))
         print('[GangAI] Tick rates: combat=' .. Config.AmbientSpawning.tickRates.combat ..
               'ms, nearby=' .. Config.AmbientSpawning.tickRates.nearby ..
               'ms, distant=' .. Config.AmbientSpawning.tickRates.distant ..

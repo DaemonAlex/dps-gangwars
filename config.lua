@@ -6,16 +6,16 @@ Config = {}
 -- ============================================
 
 Config.Integration = {
-    -- rcore_gangs resource name
-    rcoreResource = 'rcore_gangs',
+    -- Which gang script bridge to use
+    -- 'auto'         = auto-detect (tries rcore_gangs, then falls back to standalone)
+    -- 'rcore_gangs'  = force rcore_gangs adapter
+    -- 'standalone'   = use Config.StandaloneTerritories only
+    gangScript = 'auto',
 
-    -- Sync interval for checking rcore territory ownership (ms)
+    -- Sync interval for checking territory ownership (ms)
     syncInterval = 30000,
 
-    -- Use rcore's gang data for spawning appropriate NPCs
-    useRcoreGangData = true,
-
-    -- Fallback to Config.GangData if rcore gang not found
+    -- Fallback to Config.GangData if gang script gang not found
     useFallbackData = true
 }
 
@@ -242,10 +242,79 @@ Config.PoliceNotifyDistance = 500.0
 -- DEBUG & PERFORMANCE
 -- ============================================
 
-Config.Debug = false
+Config.Debug = true
 
 -- Maximum concurrent spawned gang NPCs (performance limit)
 Config.MaxSpawnedNPCs = 30
 
 -- Cleanup orphaned NPCs interval (ms)
 Config.CleanupInterval = 60000
+
+-- ============================================
+-- GANG TAG MAP
+-- Maps gang script tags (e.g. rcore tag field) to Config.GangData keys
+-- e.g. rcore gang tag 'BALLAS' -> Config.GangData key 'ballas'
+-- Only needed if the gang script uses different names than Config.GangData keys
+-- ============================================
+
+Config.GangTagMap = {
+    ['BALLAS']    = 'ballas',
+    ['VAGOS']     = 'vagos',
+    ['FAMILIES']  = 'families',
+    ['TRIADS']    = 'triads',
+    ['LOSTMC']    = 'lostmc',
+    ['LOST MC']   = 'lostmc',
+    ['MARABUNTA'] = 'marabunta',
+    ['CARTEL']    = 'cartel',
+}
+
+-- ============================================
+-- STANDALONE TERRITORIES
+-- Used when gangScript = 'standalone' or no gang script is detected
+-- Define territories manually with center + radius
+-- ============================================
+
+Config.StandaloneTerritories = {
+    {
+        name = 'grove_street',
+        label = 'Grove Street',
+        owner = 'families',
+        center = vector3(-120.0, -1620.0, 34.0),
+        radius = 100.0,
+    },
+    {
+        name = 'davis',
+        label = 'Davis',
+        owner = 'ballas',
+        center = vector3(89.0, -1940.0, 20.7),
+        radius = 100.0,
+    },
+    {
+        name = 'rancho',
+        label = 'Rancho',
+        owner = 'vagos',
+        center = vector3(470.0, -1890.0, 25.0),
+        radius = 100.0,
+    },
+    {
+        name = 'el_burro',
+        label = 'El Burro Heights',
+        owner = 'marabunta',
+        center = vector3(1490.0, -2340.0, 55.0),
+        radius = 100.0,
+    },
+    {
+        name = 'little_seoul',
+        label = 'Little Seoul',
+        owner = 'triads',
+        center = vector3(-700.0, -900.0, 19.0),
+        radius = 100.0,
+    },
+    {
+        name = 'lost_clubhouse',
+        label = 'Lost MC Clubhouse',
+        owner = 'lostmc',
+        center = vector3(980.0, -100.0, 74.0),
+        radius = 80.0,
+    },
+}

@@ -1,80 +1,41 @@
 -- ============================================
 -- GANG AMBIENT AI - Server
--- Augments rcore_gangs with ambient NPC life
+-- Uses GangBridge for gang script abstraction
 -- ============================================
 
 local QBCore = exports['qb-core']:GetCoreObject()
 
 -- State tracking
-local activeWars = {}           -- Track active territory wars
-local territoryCache = {}       -- Cache of rcore territory data
 local spawnedNPCCount = 0       -- Track total spawned NPCs
-
--- ============================================
--- RCORE_GANGS INTEGRATION
--- ============================================
-
--- Check if rcore_gangs is running
-local function IsRcoreAvailable()
-    return GetResourceState(Config.Integration.rcoreResource) == 'started'
-end
-
--- Get player's gang from rcore_gangs
-local function GetPlayerGang(source)
-    local Player = QBCore.Functions.GetPlayer(source)
-    if not Player then return nil end
-
-    -- QBCore stores gang in PlayerData.gang
-    local gangData = Player.PlayerData.gang
-    if gangData and gangData.name and gangData.name ~= 'none' then
-        return gangData.name:lower()
-    end
-
-    return nil
-end
-
--- Get territory owner from rcore (if available)
-local function GetTerritoryOwner(zoneId)
-    if not IsRcoreAvailable() then return nil end
-
-    -- Try to get territory data from rcore exports
-    local success, result = pcall(function()
-        return exports[Config.Integration.rcoreResource]:GetZoneOwner(zoneId)
-    end)
-
-    if success and result then
-        return result:lower()
-    end
-
-    return nil
-end
-
--- Get all rcore territories
-local function SyncRcoreTerritories()
-    if not IsRcoreAvailable() then return end
-
-    local success, zones = pcall(function()
-        return exports[Config.Integration.rcoreResource]:GetAllZones()
-    end)
-
-    if success and zones then
-        territoryCache = zones
-        if Config.Debug then
-            print('^2[GangAI] Synced ' .. #zones .. ' territories from rcore_gangs')
-        end
-    end
-end
 
 -- ============================================
 -- PLAYER GANG SYNC
 -- Server sends gang name, client handles relationship groups
 -- ============================================
 
+local function GetPlayerGang(source)
+    -- Try bridge first (gang script aware)
+    if GangBridge and GangBridge.GetPlayerGang then
+        local bridgeGang = GangBridge.GetPlayerGang(source)
+        if bridgeGang then return bridgeGang end
+    end
+
+    -- Fallback to QBCore gang data
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player then return nil end
+
+    local gangData = Player.PlayerData.gang
+    if gangData and gangData.name and gangData.name ~= 'none' then
+        return GangBridge and GangBridge.ResolveGangName(gangData.name) or gangData.name:lower()
+    end
+
+    return nil
+end
+
 RegisterNetEvent('gangai:server:syncPlayerRelationship', function()
     local src = source
     local playerGang = GetPlayerGang(src)
 
-    -- Send gang name to client - client will create/use relationship groups
     TriggerClientEvent('gangai:client:setPlayerRelationship', src, playerGang)
 end)
 
@@ -82,16 +43,44 @@ end)
 -- AMBIENT SPAWNING
 -- ============================================
 
--- Request ambient spawn for a territory
-RegisterNetEvent('gangai:server:requestAmbientSpawn', function(gangName, coords, heatLevel)
+RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords, heatLevel)
     local src = source
 
-    -- Validate gang exists
-    gangName = gangName:lower()
-    local gangData = Config.GangData[gangName]
+    -- Determine gang owner via bridge (server-side authority)
+    local gangName = nil
+
+    if GangBridge and GangBridge.GetZoneOwner then
+        gangName = GangBridge.GetZoneOwner(zoneName, coords)
+    end
+
+    -- If bridge couldn't determine owner (e.g. standalone), trust the zone data
+    -- The client already resolved the owner via bridge on its side
+    if not gangName and zoneName then
+        -- For standalone: look up in Config.StandaloneTerritories
+        if Config.StandaloneTerritories then
+            for _, territory in ipairs(Config.StandaloneTerritories) do
+                if territory.name == zoneName then
+                    gangName = territory.owner
+                    break
+                end
+            end
+        end
+    end
+
+    if not gangName then
+        if Config.Debug then
+            print('^1[GangAI] Could not determine zone owner for: ' .. tostring(zoneName))
+        end
+        return
+    end
+
+    -- Resolve gang name to Config.GangData key
+    local resolvedName = GangBridge and GangBridge.ResolveGangName(gangName) or gangName:lower()
+    local gangData = Config.GangData[resolvedName]
+
     if not gangData then
         if Config.Debug then
-            print('^1[GangAI] Unknown gang requested for spawn: ' .. gangName)
+            print('^1[GangAI] No Config.GangData for gang: ' .. tostring(resolvedName) .. ' (raw: ' .. tostring(gangName) .. ')')
         end
         return
     end
@@ -112,9 +101,8 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(gangName, coords,
     spawnCount = math.min(spawnCount, Config.MaxSpawnedNPCs - spawnedNPCCount)
 
     if spawnCount > 0 then
-        -- Send gang name - client handles relationship groups
         TriggerClientEvent('gangai:client:spawnAmbientNPCs', src, {
-            gangName = gangName,
+            gangName = resolvedName,
             gangData = gangData,
             coords = coords,
             count = spawnCount
@@ -123,7 +111,7 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(gangName, coords,
         spawnedNPCCount = spawnedNPCCount + spawnCount
 
         if Config.Debug then
-            print('^2[GangAI] Spawning ' .. spawnCount .. ' ' .. gangName .. ' NPCs (total: ' .. spawnedNPCCount .. ')')
+            print('^2[GangAI] Spawning ' .. spawnCount .. ' ' .. resolvedName .. ' NPCs for zone ' .. tostring(zoneName) .. ' (total: ' .. spawnedNPCCount .. ')')
         end
     end
 end)
@@ -135,84 +123,91 @@ end)
 
 -- ============================================
 -- WAR REINFORCEMENTS
--- Triggered when rcore starts a territory war
+-- Uses GangBridge callbacks for war events
 -- ============================================
 
--- Listen for rcore war events
-RegisterNetEvent('rcore_gangs:server:warStarted', function(zoneId, attackingGang, defendingGang)
-    if not Config.WarReinforcements.enabled then return end
+CreateThread(function()
+    -- Wait for bridge to initialize
+    Wait(3000)
 
-    local warId = zoneId .. '_' .. os.time()
-    activeWars[warId] = {
-        zone = zoneId,
-        attacker = attackingGang:lower(),
-        defender = defendingGang:lower(),
-        startTime = GetGameTimer()
-    }
-
-    if Config.Debug then
-        print('^3[GangAI] War started: ' .. attackingGang .. ' vs ' .. defendingGang .. ' at zone ' .. zoneId)
-    end
-
-    -- Get zone coords from cache or rcore
-    local zoneCoords = nil
-    if territoryCache[zoneId] then
-        zoneCoords = territoryCache[zoneId].coords
-    end
-
-    if not zoneCoords then
-        if Config.Debug then
-            print('^1[GangAI] Could not get zone coordinates for reinforcements')
-        end
+    if not GangBridge then
+        print('^1[GangAI] GangBridge not available, war reinforcements disabled')
         return
     end
 
-    -- Spawn defender waves
-    for _, wave in ipairs(Config.WarReinforcements.waves) do
-        SetTimeout(wave.delay, function()
-            if activeWars[warId] then -- War still active
-                TriggerClientEvent('gangai:client:spawnWarReinforcements', -1, {
-                    gangName = defendingGang:lower(),
-                    gangData = Config.GangData[defendingGang:lower()],
-                    coords = zoneCoords,
-                    count = wave.count,
-                    isDefender = true
-                })
-            end
-        end)
-    end
+    GangBridge.OnWarStart(function(zoneName, attacker, defender)
+        if not Config.WarReinforcements.enabled then return end
 
-    -- Spawn attacker waves
-    if Config.WarReinforcements.spawnAttackers then
-        for _, wave in ipairs(Config.WarReinforcements.attackerWaves) do
-            SetTimeout(wave.delay, function()
-                if activeWars[warId] then
-                    TriggerClientEvent('gangai:client:spawnWarReinforcements', -1, {
-                        gangName = attackingGang:lower(),
-                        gangData = Config.GangData[attackingGang:lower()],
-                        coords = zoneCoords,
-                        count = wave.count,
-                        isDefender = false
-                    })
+        if Config.Debug then
+            print('^3[GangAI] War started: ' .. tostring(attacker) .. ' vs ' .. tostring(defender) .. ' at zone ' .. tostring(zoneName))
+        end
+
+        -- We need zone coordinates for spawning reinforcements
+        -- Try to find coords from standalone territories or cached data
+        local zoneCoords = nil
+
+        if Config.StandaloneTerritories then
+            for _, territory in ipairs(Config.StandaloneTerritories) do
+                if territory.name == zoneName then
+                    zoneCoords = territory.center
+                    break
                 end
-            end)
-        end
-    end
-end)
-
--- Listen for rcore war end events
-RegisterNetEvent('rcore_gangs:server:warEnded', function(zoneId, winningGang)
-    -- Find and remove the war
-    for warId, war in pairs(activeWars) do
-        if war.zone == zoneId then
-            activeWars[warId] = nil
-
-            if Config.Debug then
-                print('^2[GangAI] War ended at zone ' .. zoneId .. '. Winner: ' .. tostring(winningGang))
             end
-            break
         end
-    end
+
+        if not zoneCoords then
+            if Config.Debug then
+                print('^1[GangAI] Could not get zone coordinates for war reinforcements at: ' .. tostring(zoneName))
+            end
+            return
+        end
+
+        local warId = zoneName .. '_' .. os.time()
+
+        -- Spawn defender waves
+        local defenderData = defender and Config.GangData[defender]
+        if defenderData then
+            for _, wave in ipairs(Config.WarReinforcements.waves) do
+                SetTimeout(wave.delay, function()
+                    if GangBridge.IsZoneAtWar(zoneName) then
+                        TriggerClientEvent('gangai:client:spawnWarReinforcements', -1, {
+                            gangName = defender,
+                            gangData = defenderData,
+                            coords = zoneCoords,
+                            count = wave.count,
+                            isDefender = true
+                        })
+                    end
+                end)
+            end
+        end
+
+        -- Spawn attacker waves
+        if Config.WarReinforcements.spawnAttackers then
+            local attackerData = attacker and Config.GangData[attacker]
+            if attackerData then
+                for _, wave in ipairs(Config.WarReinforcements.attackerWaves) do
+                    SetTimeout(wave.delay, function()
+                        if GangBridge.IsZoneAtWar(zoneName) then
+                            TriggerClientEvent('gangai:client:spawnWarReinforcements', -1, {
+                                gangName = attacker,
+                                gangData = attackerData,
+                                coords = zoneCoords,
+                                count = wave.count,
+                                isDefender = false
+                            })
+                        end
+                    end)
+                end
+            end
+        end
+    end)
+
+    GangBridge.OnWarEnd(function(zoneName, winner)
+        if Config.Debug then
+            print('^2[GangAI] War ended at zone ' .. tostring(zoneName) .. '. Winner: ' .. tostring(winner))
+        end
+    end)
 end)
 
 -- ============================================
@@ -247,21 +242,28 @@ QBCore.Commands.Add('gangai', 'Gang AI admin commands', {{ name = 'action', help
     local action = args[1]
 
     if action == 'status' then
+        local adapterName = GangBridge and GangBridge._adapter or 'unknown'
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Gang AI Status',
-            description = 'Active NPCs: ' .. spawnedNPCCount .. '/' .. Config.MaxSpawnedNPCs .. '\nActive Wars: ' .. tableCount(activeWars),
+            description = 'Active NPCs: ' .. spawnedNPCCount .. '/' .. Config.MaxSpawnedNPCs .. '\nBridge: ' .. adapterName,
             type = 'info',
             duration = 5000
         })
     elseif action == 'spawn' and args[2] then
         local gangName = args[2]:lower()
-        if Config.GangData[gangName] then
+        local resolvedName = GangBridge and GangBridge.ResolveGangName(gangName) or gangName
+        if Config.GangData[resolvedName] then
             local ped = GetPlayerPed(source)
             local coords = GetEntityCoords(ped)
-            TriggerEvent('gangai:server:requestAmbientSpawn', gangName, coords, 'wartime')
+            TriggerClientEvent('gangai:client:spawnAmbientNPCs', source, {
+                gangName = resolvedName,
+                gangData = Config.GangData[resolvedName],
+                coords = coords,
+                count = math.random(Config.AmbientSpawning.spawnDensity.wartime.min, Config.AmbientSpawning.spawnDensity.wartime.max)
+            })
             TriggerClientEvent('ox_lib:notify', source, {
                 title = 'Gang AI',
-                description = 'Spawning ' .. gangName .. ' NPCs',
+                description = 'Spawning ' .. resolvedName .. ' NPCs',
                 type = 'success'
             })
         else
@@ -296,19 +298,6 @@ end
 -- INITIALIZATION
 -- ============================================
 
-CreateThread(function()
-    Wait(2000) -- Wait for resources to load
-
-    -- Initial sync with rcore
-    SyncRcoreTerritories()
-
-    -- Periodic territory sync
-    while true do
-        Wait(Config.Integration.syncInterval)
-        SyncRcoreTerritories()
-    end
-end)
-
 -- Cleanup on resource stop
 AddEventHandler('onResourceStop', function(resource)
     if resource == GetCurrentResourceName() then
@@ -316,4 +305,4 @@ AddEventHandler('onResourceStop', function(resource)
     end
 end)
 
-print('^2[GangAI] Server initialized - rcore_gangs augmentation mode')
+print('^2[GangAI] Server initialized — bridge mode')
