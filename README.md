@@ -207,4 +207,3 @@ MIT License - Free to use and modify.
 ## Credits
 
 - **Author**: DaemonAlex
-- **Discord**: [Del Perro Sands RP](https://discord.gg/dpsrp)
