@@ -1,17 +1,18 @@
 -- ============================================
 -- GANG AMBIENT AI - Client
--- Handles NPC spawning, combat AI, and throttling
+-- Handles NPC spawning, combat AI, vehicles, patrols, and throttling
 -- Uses GangBridge for gang script abstraction
 -- ============================================
 
-local QBCore = exports['qb-core']:GetCoreObject()
-
 -- State tracking
-local spawnedNPCs = {}          -- All spawned NPCs { entity, gangName, spawnTime }
+local spawnedNPCs = {}          -- All spawned NPCs { entity, gangName, spawnTime, behavior }
+local spawnedVehicles = {}      -- All spawned vehicles { entity, gangName, spawnTime }
 local playerGang = nil          -- Player's gang name (lowercase)
 local playerRelationshipHash = nil
 local lastSpawnTime = {}        -- Cooldown tracking per zone name
 local inCombat = false          -- Is player in combat
+local recentGunshots = {}       -- Track recent gunshot timestamps per zone for tense detection
+local lastPoliceNotify = 0      -- Rate limit police notifications
 
 -- ============================================
 -- RELATIONSHIP GROUP MANAGEMENT (Client-side)
@@ -58,7 +59,7 @@ local function SetupGangRelationships()
         end
 
         SetRelationshipBetweenGroups(Config.Relationships.defaultToPolice, hash1, GetHashKey('COP'))
-        SetRelationshipBetweenGroups(1, hash1, GetHashKey('PLAYER'))
+        SetRelationshipBetweenGroups(Config.Relationships.defaultToPlayer, hash1, GetHashKey('PLAYER'))
     end
 
     relationshipsInitialized = true
@@ -69,10 +70,37 @@ local function SetupGangRelationships()
 end
 
 -- ============================================
--- TIERED PROXIMITY THROTTLING
+-- TIME OF DAY HELPERS
 -- ============================================
 
-local currentTickRate = Config.AmbientSpawning.tickRates.background
+local function GetTimeOfDay()
+    local hour = GetClockHours()
+    if hour >= 22 or hour < 6 then
+        return 'night'
+    elseif hour >= 6 and hour < 12 then
+        return 'morning'
+    elseif hour >= 12 and hour < 18 then
+        return 'afternoon'
+    else
+        return 'evening'
+    end
+end
+
+local function GetTimeDensityMultiplier()
+    local tod = GetTimeOfDay()
+    if tod == 'night' then
+        return 1.4 -- More gang activity at night
+    elseif tod == 'evening' then
+        return 1.2
+    elseif tod == 'morning' then
+        return 0.7 -- Less activity in the morning
+    end
+    return 1.0
+end
+
+-- ============================================
+-- TIERED PROXIMITY THROTTLING
+-- ============================================
 
 local function GetOptimalTickRate()
     local ped = PlayerPedId()
@@ -246,6 +274,51 @@ local function TriggerRecruitment(ped, gangName)
 end
 
 -- ============================================
+-- NPC BEHAVIOR SYSTEM
+-- Patrol, wander, and time-of-day scenarios
+-- ============================================
+
+local function AssignBehavior(ped, gangData, coords)
+    local tod = GetTimeOfDay()
+    local roll = math.random(100)
+
+    -- At night: more wandering and standing around, fewer scenarios
+    -- During day: more scenarios (smoking, drinking, dealing)
+    if tod == 'night' then
+        if roll <= 35 then
+            -- Wander around the territory
+            TaskWanderInArea(ped, coords.x, coords.y, coords.z, Config.AmbientSpawning.spawnRadius * 0.4, 1.0, 3.0)
+            return 'wander'
+        elseif roll <= 60 then
+            -- Guard/lookout behavior at night
+            TaskGuardCurrentPosition(ped, 15.0, 15.0, true)
+            return 'guard'
+        end
+    elseif tod == 'morning' then
+        if roll <= 50 then
+            -- More likely to just stand around in morning
+            TaskWanderInArea(ped, coords.x, coords.y, coords.z, Config.AmbientSpawning.spawnRadius * 0.3, 0.5, 2.0)
+            return 'wander'
+        end
+    else
+        if roll <= 25 then
+            -- Patrol/wander during afternoon/evening
+            TaskWanderInArea(ped, coords.x, coords.y, coords.z, Config.AmbientSpawning.spawnRadius * 0.5, 1.0, 4.0)
+            return 'wander'
+        end
+    end
+
+    -- Default: use scenario from gang data
+    if gangData.scenarios and #gangData.scenarios > 0 then
+        local scenario = gangData.scenarios[math.random(#gangData.scenarios)]
+        TaskStartScenarioInPlace(ped, scenario, 0, true)
+        return 'scenario'
+    end
+
+    return 'idle'
+end
+
+-- ============================================
 -- NPC SPAWNING
 -- ============================================
 
@@ -300,10 +373,10 @@ local function SpawnGangNPC(gangName, gangData, coords)
     -- Apply combat AI
     ApplyCombatAI(ped, gangData)
 
-    -- Apply scenario if peaceful
-    if gangData.scenarios and #gangData.scenarios > 0 and not inCombat then
-        local scenario = gangData.scenarios[math.random(#gangData.scenarios)]
-        TaskStartScenarioInPlace(ped, scenario, 0, true)
+    -- Assign behavior (patrol, wander, scenario) based on time of day
+    local behavior = 'idle'
+    if not inCombat then
+        behavior = AssignBehavior(ped, gangData, coords)
     end
 
     -- Only mark as enemy if player is in a DIFFERENT gang (not if player has no gang)
@@ -317,7 +390,8 @@ local function SpawnGangNPC(gangName, gangData, coords)
         entity = ped,
         gangName = gangName,
         spawnTime = GetGameTimer(),
-        coords = vector3(spawnX, spawnY, spawnZ)
+        coords = vector3(spawnX, spawnY, spawnZ),
+        behavior = behavior
     }
     spawnedNPCs[ped] = npcData
 
@@ -333,6 +407,85 @@ local function SpawnGangNPC(gangName, gangData, coords)
     return ped
 end
 
+-- ============================================
+-- VEHICLE SPAWNING
+-- ============================================
+
+local function SpawnGangVehicle(gangName, gangData, coords)
+    if not gangData.vehicles or #gangData.vehicles == 0 then return nil end
+    if not Config.VehicleSpawning or not Config.VehicleSpawning.enabled then return nil end
+
+    -- Check vehicle cap
+    local vehCount = 0
+    for _ in pairs(spawnedVehicles) do vehCount = vehCount + 1 end
+    if vehCount >= (Config.VehicleSpawning.maxVehicles or 10) then return nil end
+
+    local vehicleName = gangData.vehicles[math.random(#gangData.vehicles)]
+    local vehicleHash = GetHashKey(vehicleName)
+
+    RequestModel(vehicleHash)
+    local timeout = 0
+    while not HasModelLoaded(vehicleHash) and timeout < 5000 do
+        Wait(100)
+        timeout = timeout + 100
+    end
+
+    if not HasModelLoaded(vehicleHash) then return nil end
+
+    -- Spawn at random offset
+    local angle = math.random() * 2 * math.pi
+    local dist = math.random(20, math.floor(Config.AmbientSpawning.spawnRadius * 0.6))
+    local spawnX = coords.x + dist * math.cos(angle)
+    local spawnY = coords.y + dist * math.sin(angle)
+
+    -- Find a road node near the spawn point
+    local found, roadX, roadY, roadZ, heading = GetClosestVehicleNodeWithHeading(spawnX, spawnY, coords.z, 1, 3.0, 0)
+    if not found then
+        SetModelAsNoLongerNeeded(vehicleHash)
+        return nil
+    end
+
+    local vehicle = CreateVehicle(vehicleHash, roadX, roadY, roadZ, heading, true, true)
+
+    if not DoesEntityExist(vehicle) then
+        SetModelAsNoLongerNeeded(vehicleHash)
+        return nil
+    end
+
+    -- Set vehicle as mission entity briefly for placement, then release
+    SetEntityAsMissionEntity(vehicle, true, true)
+    SetVehicleOnGroundProperly(vehicle)
+    SetVehicleDoorsLocked(vehicle, 2) -- Lock doors
+    SetModelAsNoLongerNeeded(vehicleHash)
+
+    spawnedVehicles[vehicle] = {
+        entity = vehicle,
+        gangName = gangName,
+        spawnTime = GetGameTimer()
+    }
+
+    -- Despawn timer for vehicles
+    SetTimeout(Config.VehicleSpawning.despawnDelay or 600000, function()
+        if DoesEntityExist(vehicle) and not IsVehicleSeatFree(vehicle, -1) == false then
+            -- Only despawn if nobody is in it
+            if IsVehicleSeatFree(vehicle, -1) then
+                DeleteEntity(vehicle)
+                spawnedVehicles[vehicle] = nil
+            end
+        end
+    end)
+
+    if Config.Debug then
+        print('[GangAI] Spawned ' .. gangName .. ' vehicle: ' .. vehicleName)
+    end
+
+    return vehicle
+end
+
+-- ============================================
+-- SPAWN EVENTS
+-- ============================================
+
 -- Spawn ambient NPCs event
 RegisterNetEvent('gangai:client:spawnAmbientNPCs', function(data)
     if not data or not data.gangData then return end
@@ -341,6 +494,13 @@ RegisterNetEvent('gangai:client:spawnAmbientNPCs', function(data)
         local ped = SpawnGangNPC(data.gangName, data.gangData, data.coords)
         if ped then
             Wait(100) -- Stagger spawns
+        end
+    end
+
+    -- Also spawn a vehicle occasionally
+    if data.gangData.vehicles and #data.gangData.vehicles > 0 then
+        if math.random(100) <= (Config.VehicleSpawning and Config.VehicleSpawning.spawnChance or 30) then
+            SpawnGangVehicle(data.gangName, data.gangData, data.coords)
         end
     end
 
@@ -372,7 +532,7 @@ RegisterNetEvent('gangai:client:spawnWarReinforcements', function(data)
     end
 end)
 
--- Clear all NPCs
+-- Clear all NPCs and vehicles
 RegisterNetEvent('gangai:client:clearAllNPCs', function()
     local count = 0
     for ped, _ in pairs(spawnedNPCs) do
@@ -383,8 +543,15 @@ RegisterNetEvent('gangai:client:clearAllNPCs', function()
     end
     spawnedNPCs = {}
 
+    for veh, _ in pairs(spawnedVehicles) do
+        if DoesEntityExist(veh) then
+            DeleteEntity(veh)
+        end
+    end
+    spawnedVehicles = {}
+
     if Config.Debug then
-        print('[GangAI] Cleared ' .. count .. ' NPCs')
+        print('[GangAI] Cleared ' .. count .. ' NPCs and all vehicles')
     end
 end)
 
@@ -407,13 +574,52 @@ CreateThread(function()
                 if npcData then
                     TriggerRecruitment(entity, npcData.gangName)
 
+                    -- Track gunshots for tense detection
                     local coords = GetEntityCoords(entity)
-                    TriggerServerEvent('gangai:server:notifyPolice', 'Shots fired in gang territory!', coords)
+                    local zone = GangBridge and GangBridge._adapter and GangBridge.GetZoneAtPosition(coords)
+                    if zone then
+                        recentGunshots[zone.name] = GetGameTimer()
+                    end
+
+                    -- Rate-limited police notification (max once per 15 seconds)
+                    if GetGameTimer() - lastPoliceNotify > 15000 then
+                        TriggerServerEvent('gangai:server:notifyPolice', 'Shots fired in gang territory!', coords)
+                        lastPoliceNotify = GetGameTimer()
+                    end
                 end
             end
         end
     end
 end)
+
+-- ============================================
+-- HEAT LEVEL DETECTION
+-- ============================================
+
+local function GetZoneHeatLevel(zoneName)
+    -- Wartime: active combat or zone at war
+    if inCombat then
+        return 'wartime'
+    end
+    if GangBridge and GangBridge.IsZoneAtWar and GangBridge.IsZoneAtWar(zoneName) then
+        return 'wartime'
+    end
+
+    -- Tense: recent gunshots in this zone (within 5 minutes)
+    local lastShot = recentGunshots[zoneName]
+    if lastShot and (GetGameTimer() - lastShot) < 300000 then
+        return 'tense'
+    end
+
+    -- Tense at night (gang areas are naturally more tense after dark)
+    if GetTimeOfDay() == 'night' then
+        if math.random(100) <= 30 then
+            return 'tense'
+        end
+    end
+
+    return 'peaceful'
+end
 
 -- ============================================
 -- AMBIENT SPAWNING LOOP
@@ -452,20 +658,15 @@ CreateThread(function()
                 local lastSpawn = lastSpawnTime[zone.name] or 0
                 if GetGameTimer() - lastSpawn > Config.AmbientSpawning.respawnCooldown then
 
-                    -- Determine heat level
-                    local heatLevel = 'peaceful'
-                    if inCombat then
-                        heatLevel = 'wartime'
-                    elseif GangBridge.IsZoneAtWar and GangBridge.IsZoneAtWar(zone.name) then
-                        heatLevel = 'wartime'
-                    end
+                    -- Determine heat level with full detection
+                    local heatLevel = GetZoneHeatLevel(zone.name)
 
                     -- Request spawn from server (send zone name + center for server-side ownership verification)
                     TriggerServerEvent('gangai:server:requestAmbientSpawn', zone.name, zone.center, heatLevel)
                     lastSpawnTime[zone.name] = GetGameTimer()
 
                     if Config.Debug then
-                        print('[GangAI] Zone detected: ' .. zone.name .. ' owned by ' .. zone.owner .. ' (heat: ' .. heatLevel .. ')')
+                        print('[GangAI] Zone detected: ' .. zone.name .. ' owned by ' .. zone.owner .. ' (heat: ' .. heatLevel .. ', time: ' .. GetTimeOfDay() .. ')')
                     end
                 end
             elseif Config.Debug then
@@ -479,7 +680,7 @@ end)
 
 -- ============================================
 -- CLEANUP LOOP
--- Despawn distant NPCs
+-- Despawn distant NPCs and vehicles
 -- ============================================
 
 CreateThread(function()
@@ -503,6 +704,21 @@ CreateThread(function()
             else
                 spawnedNPCs[npcPed] = nil
                 cleaned = cleaned + 1
+            end
+        end
+
+        -- Cleanup distant vehicles
+        for veh, vehData in pairs(spawnedVehicles) do
+            if DoesEntityExist(veh) then
+                local vehCoords = GetEntityCoords(veh)
+                local dist = #(coords - vehCoords)
+
+                if dist > Config.AmbientSpawning.despawnDistance and IsVehicleSeatFree(veh, -1) then
+                    DeleteEntity(veh)
+                    spawnedVehicles[veh] = nil
+                end
+            else
+                spawnedVehicles[veh] = nil
             end
         end
 

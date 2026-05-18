@@ -6,7 +6,11 @@
 local QBCore = exports['qb-core']:GetCoreObject()
 
 -- State tracking
-local spawnedNPCCount = 0       -- Track total spawned NPCs
+local spawnedNPCCount = 0           -- Track total spawned NPCs
+local playerSpawnCounts = {}        -- Per-player spawn tracking for cleanup on disconnect
+local playerSpawnCooldowns = {}     -- Per-player rate limiting { [source] = lastRequestTime }
+local playerPoliceNotifyCooldowns = {} -- Per-player police notify rate limiting
+local zoneCentersCache = {}         -- Cache zone centers discovered from rcore for war reinforcements
 
 -- ============================================
 -- PLAYER GANG SYNC
@@ -46,6 +50,21 @@ end)
 RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords, heatLevel)
     local src = source
 
+    -- Rate limit: max 1 request per 10 seconds per player
+    local now = GetGameTimer()
+    local lastRequest = playerSpawnCooldowns[src] or 0
+    if now - lastRequest < 10000 then
+        return
+    end
+    playerSpawnCooldowns[src] = now
+
+    -- Validate inputs
+    if type(zoneName) ~= 'string' or zoneName == '' then return end
+    if type(heatLevel) ~= 'string' then heatLevel = 'peaceful' end
+    if heatLevel ~= 'peaceful' and heatLevel ~= 'tense' and heatLevel ~= 'wartime' then
+        heatLevel = 'peaceful'
+    end
+
     -- Determine gang owner via bridge (server-side authority)
     local gangName = nil
 
@@ -54,9 +73,7 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
     end
 
     -- If bridge couldn't determine owner (e.g. standalone), trust the zone data
-    -- The client already resolved the owner via bridge on its side
     if not gangName and zoneName then
-        -- For standalone: look up in Config.StandaloneTerritories
         if Config.StandaloneTerritories then
             for _, territory in ipairs(Config.StandaloneTerritories) do
                 if territory.name == zoneName then
@@ -93,6 +110,11 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
         return
     end
 
+    -- Cache zone center for war reinforcements
+    if coords then
+        zoneCentersCache[zoneName] = coords
+    end
+
     -- Determine spawn count based on heat level
     local density = Config.AmbientSpawning.spawnDensity[heatLevel] or Config.AmbientSpawning.spawnDensity.peaceful
     local spawnCount = math.random(density.min, density.max)
@@ -110,15 +132,49 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
 
         spawnedNPCCount = spawnedNPCCount + spawnCount
 
+        -- Track per-player for cleanup on disconnect
+        playerSpawnCounts[src] = (playerSpawnCounts[src] or 0) + spawnCount
+
         if Config.Debug then
             print('^2[GangAI] Spawning ' .. spawnCount .. ' ' .. resolvedName .. ' NPCs for zone ' .. tostring(zoneName) .. ' (total: ' .. spawnedNPCCount .. ')')
         end
     end
 end)
 
--- NPC despawned callback
+-- NPC despawned callback (validated)
 RegisterNetEvent('gangai:server:npcDespawned', function(count)
-    spawnedNPCCount = math.max(0, spawnedNPCCount - (count or 1))
+    local src = source
+
+    -- Validate count: must be a positive integer, max reasonable value
+    if type(count) ~= 'number' or count < 1 or count > Config.MaxSpawnedNPCs then
+        return
+    end
+    count = math.floor(count)
+
+    -- Don't let per-player count go below 0
+    local playerCount = playerSpawnCounts[src] or 0
+    local actualDecrement = math.min(count, playerCount)
+
+    playerSpawnCounts[src] = math.max(0, playerCount - actualDecrement)
+    spawnedNPCCount = math.max(0, spawnedNPCCount - actualDecrement)
+end)
+
+-- Cleanup when player disconnects
+AddEventHandler('playerDropped', function(reason)
+    local src = source
+
+    -- Decrement global count by however many NPCs this player had spawned
+    local playerCount = playerSpawnCounts[src] or 0
+    if playerCount > 0 then
+        spawnedNPCCount = math.max(0, spawnedNPCCount - playerCount)
+        if Config.Debug then
+            print('^3[GangAI] Player ' .. src .. ' dropped, releasing ' .. playerCount .. ' NPC slots')
+        end
+    end
+
+    playerSpawnCounts[src] = nil
+    playerSpawnCooldowns[src] = nil
+    playerPoliceNotifyCooldowns[src] = nil
 end)
 
 -- ============================================
@@ -142,17 +198,49 @@ CreateThread(function()
             print('^3[GangAI] War started: ' .. tostring(attacker) .. ' vs ' .. tostring(defender) .. ' at zone ' .. tostring(zoneName))
         end
 
-        -- We need zone coordinates for spawning reinforcements
-        -- Try to find coords from standalone territories or cached data
+        -- Try multiple sources for zone coordinates
         local zoneCoords = nil
 
-        if Config.StandaloneTerritories then
+        -- 1. Check cached zone centers (populated during ambient spawning)
+        if zoneCentersCache[zoneName] then
+            zoneCoords = zoneCentersCache[zoneName]
+        end
+
+        -- 2. Check standalone territories
+        if not zoneCoords and Config.StandaloneTerritories then
             for _, territory in ipairs(Config.StandaloneTerritories) do
                 if territory.name == zoneName then
                     zoneCoords = territory.center
                     break
                 end
             end
+        end
+
+        -- 3. Try rcore_gangs export to get zone position
+        if not zoneCoords and GangBridge._adapter == 'rcore_gangs' and GetResourceState('rcore_gangs') == 'started' then
+            local ok, result = pcall(function()
+                -- rcore zones are defined in config, try to get zone data
+                -- We iterate connected players to find one near the war zone
+                local players = QBCore.Functions.GetQBPlayers()
+                for _, Player in pairs(players) do
+                    if Player then
+                        local ped = GetPlayerPed(Player.PlayerData.source)
+                        if DoesEntityExist(ped) then
+                            local playerCoords = GetEntityCoords(ped)
+                            local okZone, zone = pcall(function()
+                                return exports['rcore_gangs']:GetZoneAtPosition(playerCoords)
+                            end)
+                            if okZone and zone and (zone.name == zoneName) then
+                                -- Use this player's coords as approximate zone center
+                                zoneCoords = playerCoords
+                                zoneCentersCache[zoneName] = zoneCoords
+                                return true
+                            end
+                        end
+                    end
+                end
+                return false
+            end)
         end
 
         if not zoneCoords then
@@ -162,14 +250,13 @@ CreateThread(function()
             return
         end
 
-        local warId = zoneName .. '_' .. os.time()
-
         -- Spawn defender waves
         local defenderData = defender and Config.GangData[defender]
         if defenderData then
             for _, wave in ipairs(Config.WarReinforcements.waves) do
                 SetTimeout(wave.delay, function()
                     if GangBridge.IsZoneAtWar(zoneName) then
+                        -- Send to all clients — client-side does 300m distance check
                         TriggerClientEvent('gangai:client:spawnWarReinforcements', -1, {
                             gangName = defender,
                             gangData = defenderData,
@@ -211,10 +298,25 @@ CreateThread(function()
 end)
 
 -- ============================================
--- POLICE NOTIFICATIONS
+-- POLICE NOTIFICATIONS (rate limited)
 -- ============================================
 
 RegisterNetEvent('gangai:server:notifyPolice', function(message, coords)
+    local src = source
+
+    -- Rate limit: max 1 notification per 15 seconds per player
+    local now = GetGameTimer()
+    local lastNotify = playerPoliceNotifyCooldowns[src] or 0
+    if now - lastNotify < 15000 then
+        return
+    end
+    playerPoliceNotifyCooldowns[src] = now
+
+    -- Validate coords
+    if type(coords) ~= 'vector3' and (type(coords) ~= 'table' or not coords.x) then
+        return
+    end
+
     local players = QBCore.Functions.GetQBPlayers()
 
     for _, Player in pairs(players) do
@@ -276,6 +378,7 @@ QBCore.Commands.Add('gangai', 'Gang AI admin commands', {{ name = 'action', help
     elseif action == 'clear' then
         TriggerClientEvent('gangai:client:clearAllNPCs', -1)
         spawnedNPCCount = 0
+        playerSpawnCounts = {}
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Gang AI',
             description = 'All gang NPCs cleared',
@@ -283,16 +386,6 @@ QBCore.Commands.Add('gangai', 'Gang AI admin commands', {{ name = 'action', help
         })
     end
 end, 'admin')
-
--- ============================================
--- UTILITY FUNCTIONS
--- ============================================
-
-function tableCount(t)
-    local count = 0
-    for _ in pairs(t) do count = count + 1 end
-    return count
-end
 
 -- ============================================
 -- INITIALIZATION

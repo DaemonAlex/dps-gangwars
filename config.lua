@@ -242,13 +242,31 @@ Config.PoliceNotifyDistance = 500.0
 -- DEBUG & PERFORMANCE
 -- ============================================
 
-Config.Debug = true
+Config.Debug = false
 
 -- Maximum concurrent spawned gang NPCs (performance limit)
 Config.MaxSpawnedNPCs = 30
 
 -- Cleanup orphaned NPCs interval (ms)
 Config.CleanupInterval = 60000
+
+-- ============================================
+-- VEHICLE SPAWNING SETTINGS
+-- Gang vehicles parked/cruising in territories
+-- ============================================
+
+Config.VehicleSpawning = {
+    enabled = true,
+
+    -- Max concurrent gang vehicles across all zones
+    maxVehicles = 10,
+
+    -- Chance (%) to spawn a vehicle alongside NPC spawns
+    spawnChance = 30,
+
+    -- Time before unoccupied vehicles despawn (ms)
+    despawnDelay = 600000 -- 10 minutes
+}
 
 -- ============================================
 -- GANG TAG MAP

@@ -2,10 +2,10 @@ fx_version 'cerulean'
 games { 'gta5' }
 lua54 'yes'
 
-name 'gang-ambient-ai'
+name 'dps-gangwars'
 author 'DaemonAlex'
 description 'Gang ambient AI system - augments rcore_gangs with intelligent NPCs, territory population, and war reinforcements'
-version '2.1.0'
+version '2.2.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -20,5 +20,5 @@ server_script 'server.lua'
 
 dependencies {
     'ox_lib',
-    'qb-core'
+    'qb-core', -- qbx_core provides 'qb-core' via compatibility shim
 }
