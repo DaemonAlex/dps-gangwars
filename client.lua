@@ -5,7 +5,8 @@
 -- ============================================
 
 -- State tracking
-local spawnedNPCs = {}          -- All spawned NPCs { entity, gangName, spawnTime, behavior }
+local spawnedNPCs = {}          -- Ambient spawned NPCs { entity, gangName, spawnTime, behavior }
+local spawnedWarNPCs = {}       -- War-reinforcement NPCs (separate pool, separately capped)
 local spawnedVehicles = {}      -- All spawned vehicles { entity, gangName, spawnTime }
 local playerGang = nil          -- Player's gang name (lowercase)
 local playerRelationshipHash = nil
@@ -322,7 +323,44 @@ end
 -- NPC SPAWNING
 -- ============================================
 
-local function SpawnGangNPC(gangName, gangData, coords)
+-- Self-rescheduling despawn scheduler.
+-- Removes an idle NPC after despawnDelay, but if the ped is still in combat it
+-- reschedules instead of leaking the slot forever, and force-removes past a hard
+-- max age regardless of combat. The pool-membership guard keeps the despawn
+-- report symmetric (never double-decrements if the cleanup loop got there first).
+local function ScheduleNPCDespawn(ped, pool, despawnEvent, spawnTime)
+    local baseDelay = Config.AmbientSpawning.despawnDelay or 300000
+    local maxAge = Config.AmbientSpawning.maxNPCAge or (baseDelay * 3)
+
+    local function check()
+        if not DoesEntityExist(ped) then
+            if pool[ped] then
+                pool[ped] = nil
+                TriggerServerEvent(despawnEvent, 1)
+            end
+            return
+        end
+
+        local age = GetGameTimer() - spawnTime
+
+        if age >= maxAge or not IsPedInCombat(ped) then
+            DeleteEntity(ped)
+            if pool[ped] then
+                pool[ped] = nil
+                TriggerServerEvent(despawnEvent, 1)
+            end
+            return
+        end
+
+        -- Still in combat and under max age: check again later.
+        SetTimeout(30000, check)
+    end
+
+    SetTimeout(baseDelay, check)
+end
+
+--- @param isWar boolean|nil  route into the separate war-reinforcement pool
+local function SpawnGangNPC(gangName, gangData, coords, isWar)
     SetupGangRelationships()
 
     local relationshipHash = GetOrCreateGangRelationship(gangName)
@@ -386,23 +424,22 @@ local function SpawnGangNPC(gangName, gangData, coords)
 
     SetModelAsNoLongerNeeded(modelHash)
 
+    local spawnTime = GetGameTimer()
+    local pool = isWar and spawnedWarNPCs or spawnedNPCs
+    local despawnEvent = isWar and 'gangai:server:warNpcDespawned' or 'gangai:server:npcDespawned'
+
     local npcData = {
         entity = ped,
         gangName = gangName,
-        spawnTime = GetGameTimer(),
+        spawnTime = spawnTime,
         coords = vector3(spawnX, spawnY, spawnZ),
-        behavior = behavior
+        behavior = behavior,
+        isWar = isWar or false
     }
-    spawnedNPCs[ped] = npcData
+    pool[ped] = npcData
 
-    -- Despawn timer
-    SetTimeout(Config.AmbientSpawning.despawnDelay, function()
-        if DoesEntityExist(ped) and not IsPedInCombat(ped) then
-            DeleteEntity(ped)
-            spawnedNPCs[ped] = nil
-            TriggerServerEvent('gangai:server:npcDespawned', 1)
-        end
-    end)
+    -- Despawn timer (reschedules while in combat, force-removes past max age)
+    ScheduleNPCDespawn(ped, pool, despawnEvent, spawnTime)
 
     return ped
 end
@@ -464,14 +501,11 @@ local function SpawnGangVehicle(gangName, gangData, coords)
         spawnTime = GetGameTimer()
     }
 
-    -- Despawn timer for vehicles
+    -- Despawn timer for vehicles — only remove if the driver seat is empty
     SetTimeout(Config.VehicleSpawning.despawnDelay or 600000, function()
-        if DoesEntityExist(vehicle) and not IsVehicleSeatFree(vehicle, -1) == false then
-            -- Only despawn if nobody is in it
-            if IsVehicleSeatFree(vehicle, -1) then
-                DeleteEntity(vehicle)
-                spawnedVehicles[vehicle] = nil
-            end
+        if DoesEntityExist(vehicle) and IsVehicleSeatFree(vehicle, -1) then
+            DeleteEntity(vehicle)
+            spawnedVehicles[vehicle] = nil
         end
     end)
 
@@ -518,17 +552,30 @@ RegisterNetEvent('gangai:client:spawnWarReinforcements', function(data)
 
     if dist > 300.0 then return end
 
+    -- Per-client war NPC cap (war NPCs are pooled/capped separately from ambient)
+    local maxWar = Config.WarReinforcements.maxWarNPCs or 40
+    local warCount = 0
+    for _ in pairs(spawnedWarNPCs) do warCount = warCount + 1 end
+
+    local spawned = 0
     for i = 1, data.count do
-        local ped = SpawnGangNPC(data.gangName, data.gangData, data.coords)
+        if warCount + spawned >= maxWar then break end
+        local ped = SpawnGangNPC(data.gangName, data.gangData, data.coords, true)
         if ped then
             TaskCombatHatedTargetsAroundPed(ped, 150.0, 0)
+            spawned = spawned + 1
             Wait(100)
         end
     end
 
+    -- Report actual spawns so the server war tally stays symmetric with despawns
+    if spawned > 0 then
+        TriggerServerEvent('gangai:server:warNpcSpawned', spawned)
+    end
+
     if Config.Debug then
         local role = data.isDefender and 'defenders' or 'attackers'
-        print('[GangAI] Spawned ' .. data.count .. ' ' .. data.gangName .. ' ' .. role)
+        print('[GangAI] Spawned ' .. spawned .. ' ' .. data.gangName .. ' ' .. role)
     end
 end)
 
@@ -542,6 +589,16 @@ RegisterNetEvent('gangai:client:clearAllNPCs', function()
         end
     end
     spawnedNPCs = {}
+
+    -- War-reinforcement pool (server resets its war tally in the same paths that
+    -- fire this event, so no despawn report is needed here)
+    for ped, _ in pairs(spawnedWarNPCs) do
+        if DoesEntityExist(ped) then
+            DeleteEntity(ped)
+            count = count + 1
+        end
+    end
+    spawnedWarNPCs = {}
 
     for veh, _ in pairs(spawnedVehicles) do
         if DoesEntityExist(veh) then
@@ -654,19 +711,29 @@ CreateThread(function()
             local gangData = Config.GangData[zone.owner]
 
             if gangData then
+                -- Gate spawns by proximity to the zone center (NPCs spawn near the
+                -- center, so there's no point requesting them from far across a zone)
+                local triggerDist = Config.AmbientSpawning.playerTriggerDistance or 80.0
+                local distToCenter = zone.center
+                    and #(coords - vector3(zone.center.x, zone.center.y, zone.center.z))
+                    or 0.0
+
                 -- Check cooldown per zone
                 local lastSpawn = lastSpawnTime[zone.name] or 0
-                if GetGameTimer() - lastSpawn > Config.AmbientSpawning.respawnCooldown then
+                if distToCenter <= triggerDist and GetGameTimer() - lastSpawn > Config.AmbientSpawning.respawnCooldown then
 
                     -- Determine heat level with full detection
                     local heatLevel = GetZoneHeatLevel(zone.name)
 
+                    -- Time-of-day density multiplier (night = more gang activity)
+                    local densityMult = GetTimeDensityMultiplier()
+
                     -- Request spawn from server (send zone name + center for server-side ownership verification)
-                    TriggerServerEvent('gangai:server:requestAmbientSpawn', zone.name, zone.center, heatLevel)
+                    TriggerServerEvent('gangai:server:requestAmbientSpawn', zone.name, zone.center, heatLevel, densityMult)
                     lastSpawnTime[zone.name] = GetGameTimer()
 
                     if Config.Debug then
-                        print('[GangAI] Zone detected: ' .. zone.name .. ' owned by ' .. zone.owner .. ' (heat: ' .. heatLevel .. ', time: ' .. GetTimeOfDay() .. ')')
+                        print('[GangAI] Zone detected: ' .. zone.name .. ' owned by ' .. zone.owner .. ' (heat: ' .. heatLevel .. ', density x' .. densityMult .. ', time: ' .. GetTimeOfDay() .. ')')
                     end
                 end
             elseif Config.Debug then
@@ -690,6 +757,7 @@ CreateThread(function()
         local ped = PlayerPedId()
         local coords = GetEntityCoords(ped)
         local cleaned = 0
+        local warCleaned = 0
 
         for npcPed, npcData in pairs(spawnedNPCs) do
             if DoesEntityExist(npcPed) then
@@ -704,6 +772,23 @@ CreateThread(function()
             else
                 spawnedNPCs[npcPed] = nil
                 cleaned = cleaned + 1
+            end
+        end
+
+        -- Same distance-based cleanup for the war-reinforcement pool
+        for npcPed, npcData in pairs(spawnedWarNPCs) do
+            if DoesEntityExist(npcPed) then
+                local npcCoords = GetEntityCoords(npcPed)
+                local dist = #(coords - npcCoords)
+
+                if dist > Config.AmbientSpawning.despawnDistance and not IsPedInCombat(npcPed) then
+                    DeleteEntity(npcPed)
+                    spawnedWarNPCs[npcPed] = nil
+                    warCleaned = warCleaned + 1
+                end
+            else
+                spawnedWarNPCs[npcPed] = nil
+                warCleaned = warCleaned + 1
             end
         end
 
@@ -724,9 +809,12 @@ CreateThread(function()
 
         if cleaned > 0 then
             TriggerServerEvent('gangai:server:npcDespawned', cleaned)
-            if Config.Debug then
-                print('[GangAI] Cleaned up ' .. cleaned .. ' distant/dead NPCs')
-            end
+        end
+        if warCleaned > 0 then
+            TriggerServerEvent('gangai:server:warNpcDespawned', warCleaned)
+        end
+        if Config.Debug and (cleaned > 0 or warCleaned > 0) then
+            print('[GangAI] Cleaned up ' .. cleaned .. ' ambient + ' .. warCleaned .. ' war distant/dead NPCs')
         end
     end
 end)

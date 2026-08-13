@@ -1,4 +1,4 @@
-# dps-gangwars v2.1.0
+# dps-gangwars v2.3.0
 
 **Gang Ambient AI System** - Spawns intelligent gang NPCs in territories with combat AI, recruitment, and war reinforcements. Works with rcore_gangs, standalone territories, or any gang script via the bridge adapter system.
 
@@ -27,7 +27,7 @@ This resource adds ambient gang NPC presence to your server. Gang members popula
 ## Dependencies
 
 - [ox_lib](https://github.com/overextended/ox_lib)
-- [qb-core](https://github.com/qbcore-framework/qb-core) or [qbx_core](https://github.com/Qbox-project/qbx_core)
+- [qbx_core](https://github.com/Qbox-project/qbx_core) — required by the manifest. The core object is fetched at runtime via `qbx_core` (with a `qb-core` fallback), so a legacy qb-core server also works if you change the `dependencies` in `fxmanifest.lua` to `qb-core`.
 
 ### Optional
 

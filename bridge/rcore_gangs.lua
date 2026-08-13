@@ -1,14 +1,32 @@
 -- ============================================
 -- GANG BRIDGE - rcore_gangs Adapter
--- Wraps rcore_gangs exports into the unified GangBridge API
+-- Wraps rcore_gangs exports into the unified GangBridge API.
+-- Functions are registered into GangBridge.adapters.rcore_gangs so they never
+-- collide with the standalone adapter; init.lua dispatches to the active one.
 -- ============================================
 
 if not GangBridge then return end
 
 local RESOURCE = 'rcore_gangs'
+local adapter = GangBridge.adapters.rcore_gangs
 
-local function IsAvailable()
-    return GangBridge._adapter == 'rcore_gangs' and GetResourceState(RESOURCE) == 'started'
+local function IsRunning()
+    return GetResourceState(RESOURCE) == 'started'
+end
+
+-- ============================================
+-- ONE-TIME EXPORT FAILURE LOGGING
+-- rcore export/event names are assumptions (rcore is escrowed). Surface a wrong
+-- name once per distinct export so it doesn't fail silently forever. Logged
+-- regardless of Config.Debug because a wrong name breaks the whole adapter.
+-- ============================================
+
+local loggedExportErrors = {}
+local function LogExportError(exportName, err)
+    if loggedExportErrors[exportName] then return end
+    loggedExportErrors[exportName] = true
+    print(('^1[GangAI] rcore_gangs export "%s" failed - verify the export name against your rcore_gangs version: %s^0')
+        :format(exportName, tostring(err)))
 end
 
 -- ============================================
@@ -45,14 +63,18 @@ if not IsDuplicityVersion() then
     --- Get the zone at a given position
     --- @param coords vector3
     --- @return table|nil  { name, label, center, owner }
-    function GangBridge.GetZoneAtPosition(coords)
-        if not IsAvailable() then return nil end
+    function adapter.GetZoneAtPosition(coords)
+        if not IsRunning() then return nil end
 
         local ok, zone = pcall(function()
             return exports[RESOURCE]:GetZoneAtPosition(coords)
         end)
 
-        if not ok or not zone then return nil end
+        if not ok then
+            LogExportError('GetZoneAtPosition', zone)
+            return nil
+        end
+        if not zone then return nil end
 
         -- rcore returns a zone table; extract what we need
         local zoneName = zone.name or zone.label or 'unknown'
@@ -64,7 +86,9 @@ if not IsDuplicityVersion() then
             return exports[RESOURCE]:GetGangAtZone(zone)
         end)
 
-        if okOwner and gang then
+        if not okOwner then
+            LogExportError('GetGangAtZone', gang)
+        elseif gang then
             -- rcore returns a gang table with a 'tag' field
             local rawTag = nil
             if type(gang) == 'table' then
@@ -86,14 +110,19 @@ if not IsDuplicityVersion() then
 
     --- Get the local player's gang (client-side)
     --- @return table|nil  { tag, name }
-    function GangBridge.GetPlayerGangClient()
-        if not IsAvailable() then return nil end
+    function adapter.GetPlayerGangClient()
+        if not IsRunning() then return nil end
 
         local ok, result = pcall(function()
             return exports[RESOURCE]:GetPlayerGang()
         end)
 
-        if ok and result then
+        if not ok then
+            LogExportError('GetPlayerGang', result)
+            return nil
+        end
+
+        if result then
             if type(result) == 'table' then
                 return result
             elseif type(result) == 'string' then
@@ -116,8 +145,8 @@ if IsDuplicityVersion() then
     --- @param zoneName string
     --- @param centerCoords vector3|nil  optional center coords for lookup
     --- @return string|nil  resolved gang name (lowercase, matching Config.GangData key)
-    function GangBridge.GetZoneOwner(zoneName, centerCoords)
-        if not IsAvailable() then return nil end
+    function adapter.GetZoneOwner(zoneName, centerCoords)
+        if not IsRunning() then return nil end
 
         -- If we have center coords, use GetZoneAtPosition to get the zone, then GetGangAtZone
         if centerCoords then
@@ -125,12 +154,16 @@ if IsDuplicityVersion() then
                 return exports[RESOURCE]:GetZoneAtPosition(centerCoords)
             end)
 
-            if okZone and zone then
+            if not okZone then
+                LogExportError('GetZoneAtPosition', zone)
+            elseif zone then
                 local okGang, gang = pcall(function()
                     return exports[RESOURCE]:GetGangAtZone(zone)
                 end)
 
-                if okGang and gang then
+                if not okGang then
+                    LogExportError('GetGangAtZone', gang)
+                elseif gang then
                     local rawTag = nil
                     if type(gang) == 'table' then
                         rawTag = gang.tag or gang.name or gang.label
@@ -148,14 +181,19 @@ if IsDuplicityVersion() then
     --- Get a player's gang name (server-side)
     --- @param source number  player server ID
     --- @return string|nil  resolved gang name (lowercase)
-    function GangBridge.GetPlayerGang(source)
-        if not IsAvailable() then return nil end
+    function adapter.GetPlayerGang(source)
+        if not IsRunning() then return nil end
 
         local ok, result = pcall(function()
             return exports[RESOURCE]:GetPlayerGang(source)
         end)
 
-        if ok and result then
+        if not ok then
+            LogExportError('GetPlayerGang', result)
+            return nil
+        end
+
+        if result then
             local rawTag = nil
             if type(result) == 'table' then
                 rawTag = result.tag or result.name or result.label
@@ -168,10 +206,14 @@ if IsDuplicityVersion() then
         return nil
     end
 
-    -- Register war event listeners for rcore_gangs
-    -- rcore uses start_rivalry / finish_rivalry events
-    RegisterNetEvent('rcore_gangs:server:start_rivalry', function(data)
-        if not IsAvailable() then return end
+    -- Register war event listeners for rcore_gangs.
+    -- rcore fires start_rivalry / finish_rivalry server-side, so these are
+    -- AddEventHandler (NOT RegisterNetEvent) — a networked handler would let any
+    -- modified client trigger server-wide war reinforcement waves.
+    -- NOTE: if a future rcore version fires these client->server via
+    -- TriggerServerEvent, convert back to RegisterNetEvent AND validate source.
+    AddEventHandler('rcore_gangs:server:start_rivalry', function(data)
+        if GangBridge._adapter ~= 'rcore_gangs' then return end
 
         local zoneName = 'unknown'
         local attacker = nil
@@ -192,8 +234,8 @@ if IsDuplicityVersion() then
         GangBridge._fireWarStart(zoneName, attacker, defender)
     end)
 
-    RegisterNetEvent('rcore_gangs:server:finish_rivalry', function(data)
-        if not IsAvailable() then return end
+    AddEventHandler('rcore_gangs:server:finish_rivalry', function(data)
+        if GangBridge._adapter ~= 'rcore_gangs' then return end
 
         local zoneName = 'unknown'
         local winner = nil

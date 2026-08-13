@@ -12,10 +12,8 @@ Config.Integration = {
     -- 'standalone'   = use Config.StandaloneTerritories only
     gangScript = 'auto',
 
-    -- Sync interval for checking territory ownership (ms)
-    syncInterval = 30000,
-
-    -- Fallback to Config.GangData if gang script gang not found
+    -- If the gang script can't resolve a zone owner, fall back to
+    -- Config.StandaloneTerritories to determine who owns the zone.
     useFallbackData = true
 }
 
@@ -130,11 +128,12 @@ Config.AmbientSpawning = {
     -- Distance thresholds
     spawnRadius = 100.0,        -- Radius around territory center to spawn NPCs
     despawnDistance = 200.0,    -- Distance before NPCs despawn
-    playerTriggerDistance = 80.0, -- Distance to trigger ambient spawn
+    playerTriggerDistance = 80.0, -- Player must be within this distance of the zone center to trigger an ambient spawn
 
     -- Timing
     respawnCooldown = 60000,    -- Minimum time between respawns in same area (ms)
-    despawnDelay = 300000       -- Time until idle NPCs despawn (5 min)
+    despawnDelay = 300000,      -- Time until idle NPCs despawn (5 min)
+    maxNPCAge = 900000          -- Hard max lifetime; NPC is force-removed after this even if in combat (15 min)
 }
 
 -- ============================================
@@ -189,6 +188,10 @@ Config.CombatAI = {
 Config.WarReinforcements = {
     enabled = true,
 
+    -- Per-client cap on concurrent war-reinforcement NPCs.
+    -- War NPCs are tracked/capped separately from ambient NPCs (Config.MaxSpawnedNPCs).
+    maxWarNPCs = 40,
+
     -- Waves of reinforcements during war
     waves = {
         { delay = 0, count = 4 },       -- Immediate defenders
@@ -212,9 +215,6 @@ Config.WarReinforcements = {
 -- ============================================
 
 Config.Relationships = {
-    -- Sync with rcore gang relationships
-    syncWithRcore = true,
-
     -- Default relationship if rcore data unavailable
     -- 0=companion, 1=respect, 2=like, 3=neutral, 4=dislike, 5=hate
     defaultToPlayer = 3,        -- Neutral unless in rival gang

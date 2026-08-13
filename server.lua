@@ -3,11 +3,21 @@
 -- Uses GangBridge for gang script abstraction
 -- ============================================
 
-local QBCore = exports['qb-core']:GetCoreObject()
+-- qbx_core is native and does NOT expose GetCoreObject; it ships each function as a
+-- discrete export. Provide a thin compat shim mapping only the methods this file uses,
+-- so the QBCore.Functions.* call sites below stay unchanged.
+local QBCore = {
+    Functions = {
+        GetPlayer = function(src) return exports.qbx_core:GetPlayer(src) end,
+        GetQBPlayers = function() return exports.qbx_core:GetQBPlayers() end,
+    }
+}
 
 -- State tracking
-local spawnedNPCCount = 0           -- Track total spawned NPCs
-local playerSpawnCounts = {}        -- Per-player spawn tracking for cleanup on disconnect
+local spawnedNPCCount = 0           -- Track total ambient spawned NPCs
+local warNPCCount = 0               -- Track total war-reinforcement NPCs (separate pool/cap)
+local playerSpawnCounts = {}        -- Per-player ambient spawn tracking for cleanup on disconnect
+local playerWarCounts = {}          -- Per-player war-reinforcement spawn tracking for cleanup on disconnect
 local playerSpawnCooldowns = {}     -- Per-player rate limiting { [source] = lastRequestTime }
 local playerPoliceNotifyCooldowns = {} -- Per-player police notify rate limiting
 local zoneCentersCache = {}         -- Cache zone centers discovered from rcore for war reinforcements
@@ -47,7 +57,7 @@ end)
 -- AMBIENT SPAWNING
 -- ============================================
 
-RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords, heatLevel)
+RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords, heatLevel, densityMult)
     local src = source
 
     -- Rate limit: max 1 request per 10 seconds per player
@@ -65,6 +75,10 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
         heatLevel = 'peaceful'
     end
 
+    -- Time-of-day density multiplier (client-computed, clamped server-side)
+    if type(densityMult) ~= 'number' then densityMult = 1.0 end
+    densityMult = math.max(0.5, math.min(2.0, densityMult))
+
     -- Determine gang owner via bridge (server-side authority)
     local gangName = nil
 
@@ -72,8 +86,9 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
         gangName = GangBridge.GetZoneOwner(zoneName, coords)
     end
 
-    -- If bridge couldn't determine owner (e.g. standalone), trust the zone data
-    if not gangName and zoneName then
+    -- If bridge couldn't determine owner (e.g. standalone), fall back to the
+    -- configured territory list (gated by Config.Integration.useFallbackData).
+    if not gangName and zoneName and Config.Integration.useFallbackData then
         if Config.StandaloneTerritories then
             for _, territory in ipairs(Config.StandaloneTerritories) do
                 if territory.name == zoneName then
@@ -115,9 +130,11 @@ RegisterNetEvent('gangai:server:requestAmbientSpawn', function(zoneName, coords,
         zoneCentersCache[zoneName] = coords
     end
 
-    -- Determine spawn count based on heat level
+    -- Determine spawn count based on heat level, scaled by time-of-day density
     local density = Config.AmbientSpawning.spawnDensity[heatLevel] or Config.AmbientSpawning.spawnDensity.peaceful
     local spawnCount = math.random(density.min, density.max)
+    spawnCount = math.floor(spawnCount * densityMult + 0.5)
+    spawnCount = math.max(density.min, spawnCount) -- night boost never drops below base minimum
 
     -- Clamp to not exceed limit
     spawnCount = math.min(spawnCount, Config.MaxSpawnedNPCs - spawnedNPCCount)
@@ -159,6 +176,36 @@ RegisterNetEvent('gangai:server:npcDespawned', function(count)
     spawnedNPCCount = math.max(0, spawnedNPCCount - actualDecrement)
 end)
 
+-- War-reinforcement NPC spawned callback (client reports actual spawns so the
+-- war tally stays symmetric with despawns and cannot drift).
+RegisterNetEvent('gangai:server:warNpcSpawned', function(count)
+    local src = source
+
+    if type(count) ~= 'number' or count < 1 or count > (Config.WarReinforcements.maxWarNPCs or 40) then
+        return
+    end
+    count = math.floor(count)
+
+    warNPCCount = warNPCCount + count
+    playerWarCounts[src] = (playerWarCounts[src] or 0) + count
+end)
+
+-- War-reinforcement NPC despawned callback (validated, symmetric with the above)
+RegisterNetEvent('gangai:server:warNpcDespawned', function(count)
+    local src = source
+
+    if type(count) ~= 'number' or count < 1 or count > (Config.WarReinforcements.maxWarNPCs or 40) then
+        return
+    end
+    count = math.floor(count)
+
+    local playerCount = playerWarCounts[src] or 0
+    local actualDecrement = math.min(count, playerCount)
+
+    playerWarCounts[src] = math.max(0, playerCount - actualDecrement)
+    warNPCCount = math.max(0, warNPCCount - actualDecrement)
+end)
+
 -- Cleanup when player disconnects
 AddEventHandler('playerDropped', function(reason)
     local src = source
@@ -172,7 +219,14 @@ AddEventHandler('playerDropped', function(reason)
         end
     end
 
+    -- Release this player's war-reinforcement slots too
+    local warCount = playerWarCounts[src] or 0
+    if warCount > 0 then
+        warNPCCount = math.max(0, warNPCCount - warCount)
+    end
+
     playerSpawnCounts[src] = nil
+    playerWarCounts[src] = nil
     playerSpawnCooldowns[src] = nil
     playerPoliceNotifyCooldowns[src] = nil
 end)
@@ -340,19 +394,28 @@ end)
 -- ADMIN COMMANDS
 -- ============================================
 
-QBCore.Commands.Add('gangai', 'Gang AI admin commands', {{ name = 'action', help = 'status/spawn/clear' }, { name = 'gang', help = 'Gang name (optional)' }}, false, function(source, args)
-    local action = args[1]
+lib.addCommand('gangai', {
+    help = 'Gang AI admin commands',
+    params = {
+        { name = 'action', help = 'status/spawn/clear' },
+        { name = 'gang', help = 'Gang name (optional)', optional = true },
+    },
+    restricted = 'group.admin',
+}, function(source, args)
+    local action = args.action
 
     if action == 'status' then
         local adapterName = GangBridge and GangBridge._adapter or 'unknown'
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Gang AI Status',
-            description = 'Active NPCs: ' .. spawnedNPCCount .. '/' .. Config.MaxSpawnedNPCs .. '\nBridge: ' .. adapterName,
+            description = 'Ambient NPCs: ' .. spawnedNPCCount .. '/' .. Config.MaxSpawnedNPCs ..
+                '\nWar NPCs: ' .. warNPCCount ..
+                '\nBridge: ' .. adapterName,
             type = 'info',
             duration = 5000
         })
-    elseif action == 'spawn' and args[2] then
-        local gangName = args[2]:lower()
+    elseif action == 'spawn' and args.gang then
+        local gangName = args.gang:lower()
         local resolvedName = GangBridge and GangBridge.ResolveGangName(gangName) or gangName
         if Config.GangData[resolvedName] then
             local ped = GetPlayerPed(source)
@@ -371,21 +434,23 @@ QBCore.Commands.Add('gangai', 'Gang AI admin commands', {{ name = 'action', help
         else
             TriggerClientEvent('ox_lib:notify', source, {
                 title = 'Error',
-                description = 'Unknown gang: ' .. args[2],
+                description = 'Unknown gang: ' .. args.gang,
                 type = 'error'
             })
         end
     elseif action == 'clear' then
         TriggerClientEvent('gangai:client:clearAllNPCs', -1)
         spawnedNPCCount = 0
+        warNPCCount = 0
         playerSpawnCounts = {}
+        playerWarCounts = {}
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Gang AI',
             description = 'All gang NPCs cleared',
             type = 'success'
         })
     end
-end, 'admin')
+end)
 
 -- ============================================
 -- INITIALIZATION

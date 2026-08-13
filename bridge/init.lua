@@ -8,7 +8,56 @@ GangBridge = {
     _warStartCallbacks = {},
     _warEndCallbacks = {},
     _activeWars = {},
+
+    -- Each adapter registers its implementation into its own namespace so the
+    -- two adapters never overwrite each other (they share one Lua state per
+    -- context). The public GangBridge.* functions below dispatch to whichever
+    -- adapter _adapter selects at runtime.
+    adapters = {
+        rcore_gangs = {},
+        standalone = {},
+    },
 }
+
+-- ============================================
+-- PUBLIC API DISPATCH
+-- Routes each call to the currently selected adapter's implementation.
+-- Adapters only register the functions valid for their context
+-- (client or server), so wrong-context calls simply resolve to nil.
+-- ============================================
+
+local function dispatch(fnName, ...)
+    local adapterName = GangBridge._adapter
+    if not adapterName then return nil end
+
+    local adapter = GangBridge.adapters[adapterName]
+    if not adapter then return nil end
+
+    local fn = adapter[fnName]
+    if not fn then return nil end
+
+    return fn(...)
+end
+
+--- Get the zone at a given position (client). Returns { name, label, center, owner } or nil.
+function GangBridge.GetZoneAtPosition(coords)
+    return dispatch('GetZoneAtPosition', coords)
+end
+
+--- Get the local player's gang (client). Returns { tag, name } or nil.
+function GangBridge.GetPlayerGangClient()
+    return dispatch('GetPlayerGangClient')
+end
+
+--- Get the owner of a zone (server). Returns resolved gang name or nil.
+function GangBridge.GetZoneOwner(zoneName, centerCoords)
+    return dispatch('GetZoneOwner', zoneName, centerCoords)
+end
+
+--- Get a player's gang name (server). Returns resolved gang name or nil.
+function GangBridge.GetPlayerGang(source)
+    return dispatch('GetPlayerGang', source)
+end
 
 -- Register a callback for when a territory war starts
 function GangBridge.OnWarStart(cb)
