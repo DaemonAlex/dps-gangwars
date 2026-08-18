@@ -1,209 +1,126 @@
-# dps-gangwars v2.3.0
+# dps-gangwars
 
-**Gang Ambient AI System** - Spawns intelligent gang NPCs in territories with combat AI, recruitment, and war reinforcements. Works with rcore_gangs, standalone territories, or any gang script via the bridge adapter system.
+Ambient gang AI for **Del Perro Sands**. Turns quiet gang territories into places
+that feel lived-in and dangerous — corner crews holding their blocks, rivals
+rolling through, the occasional drive-by or shoot-out — and drives large
+reinforcement wars on top of [rcore_gangs](https://rcore.store) rivalries. Every
+gunfight can generate a delayed, fuzzed 911 call into the MDT.
 
-![download-3](https://github.com/user-attachments/assets/adec31f4-caf0-4aca-83d5-cb592c859b0a)
-![download](https://github.com/user-attachments/assets/bac84964-3943-486e-ae5b-e5c492b63b8c)
-![images](https://github.com/user-attachments/assets/bff7795c-3329-4f6a-ad8f-1193b93733b6)
-![download](https://github.com/user-attachments/assets/38b8a0dc-8ff2-4aec-af72-6f1a8dd1721e)
-![images](https://github.com/user-attachments/assets/60e91c8e-b399-418e-a4ac-062a7fcac8ac)
-![images-4](https://github.com/user-attachments/assets/0f02192c-f107-42c6-970b-91279aead39e)
+Players are **civilians** to all of it. The AI fights the AI; you're a bystander
+unless you make yourself a target.
 
-## Overview
-
-This resource adds ambient gang NPC presence to your server. Gang members populate their territories, react to threats, recruit nearby allies into fights, and spawn reinforcements during gang wars. Uses a **bridge/adapter pattern** so it works with multiple gang scripts or standalone.
+---
 
 ## Features
 
-- **Territory Population**: Gang NPCs spawn in owned territories when players approach
-- **Combat AI**: Configurable combat styles (aggressive, defensive, balanced) with cover, retreat, and recruitment
-- **War Reinforcements**: Timed waves of defender and attacker NPCs during territory wars/rivalries
-- **Gang Script Bridge**: Auto-detects rcore_gangs or falls back to standalone config territories
-- **Tiered Tick Rates**: Performance-optimized loop that speeds up near NPCs and slows down when distant
-- **Relationship Groups**: NPCs respect/hate based on gang affiliation — same-gang players are friendly, rivals are hostile
-- **Police Notifications**: Nearby LEO players get dispatch alerts when shots fire in gang territory
-- **Admin Commands**: `/gangai status`, `/gangai spawn <gang>`, `/gangai clear`
+### Street vibe layer
+Each configured territory, when a player is nearby, spawns a **corner crew** — a
+few gang members in that gang's models doing corner things (dealing, smoking,
+leaning), most of them concealed-armed. Cross a couple of streets and the colors
+change.
 
-## Dependencies
+Occasionally (rare by design — a per-territory cooldown of several minutes) a
+crew rolls an **event**:
+
+| Event | Weight | What happens |
+|-------|--------|--------------|
+| **Taunt stand-off** | 50% | Rivals walk up, both sides shout at each other, then back off — *unless* it escalates to gunfire (25% by day, **35% at night**). |
+| **Drive-by** | 30% | A rival car rolls the corner, sprays it, and keeps moving; the crew returns fire. |
+| **Foot skirmish** | 20% | It genuinely pops off for 20–35s; survivors break contact and the crew re-holds the corner. |
+
+The **Vespucci boardwalk** runs a special "stroll" mode instead: mixed random-gang
+walkers, presence without turf events.
+
+### Reinforcement wars
+An [rcore_gangs](https://rcore.store) rivalry (or an admin command) starts a war:
+staggered reinforcement waves for both the attacking and defending gang, a combat
+pump that keeps both sides engaged with explicit targets, and automatic cleanup
+when the war ends. Wave sizes are capped per client so a war can't overrun the
+entity budget.
+
+### Cop taunts
+Corner crews **talk shit** to police who roll past — they turn, bark a line, and
+that's it. Gangs never *initiate* on police; hostility toward cops only ever comes
+from being attacked.
+
+### Ambient gunfight witness reports
+When the AI's own NPCs shoot it out, nearby civilians "call it in": a delayed,
+position-fuzzed, anonymous **10-71** dispatch into `wasabi_mdt`. Rare and paced —
+per-area cooldowns and a cap of a few calls per fight — so it reads like real 911
+traffic, not a firehose. Distant simultaneous fights report separately, not as one
+phantom call at their midpoint.
+
+---
+
+## Design rules (non-negotiable)
+
+- **Gangs fight gangs. Players are civilians.** There is no database-driven
+  enmity — an NPC cannot know your affiliation by looking at you. The player is
+  always neutral to every gang group. (A "wear colors in rival turf → recognized"
+  mechanic is planned; it will be *earned* hostility, never automatic.)
+- **Same gang never fights itself.**
+- **Cops get lip, not lead** — never attacked unless they attack first.
+- **Events are rare.** Atmosphere, not a constant war zone.
+
+---
+
+## Requirements
 
 - [ox_lib](https://github.com/overextended/ox_lib)
-- [qbx_core](https://github.com/Qbox-project/qbx_core) — required by the manifest. The core object is fetched at runtime via `qbx_core` (with a `qb-core` fallback), so a legacy qb-core server also works if you change the `dependencies` in `fxmanifest.lua` to `qb-core`.
+- A gang script — [rcore_gangs](https://rcore.store) (auto-detected) — or the
+  built-in **standalone** territory list as a fallback.
+- [wasabi_mdt](https://wasabiscripts.com) (optional) for the witness dispatch calls.
 
-### Optional
+Works on **Qbox / QBCore** (qbx_core native, QBCore-compat).
 
-- [rcore_gangs](https://store.rcore.cz/) — auto-detected, uses real territory zones and war events
+---
 
 ## Installation
 
-1. Download and extract to your resources folder (e.g. `[standalone]/[dps]/dps-gangwars`)
-2. Add to your `server.cfg`:
-   ```
-   ensure dps-gangwars
-   ```
-3. Configure `config.lua` — set `Config.Integration.gangScript` and adjust gang data as needed
-4. Restart your server or run `ensure dps-gangwars`
+1. Drop `dps-gangwars` in your resources folder.
+2. `ensure dps-gangwars` after your gang script and ox_lib.
+3. Review `config.lua` — gang models/weapons/vehicles, territories, event tuning.
+4. For production, set `Config.Debug = false`.
 
-## Gang Script Bridge
+---
 
-The bridge system abstracts gang script differences so the core logic doesn't need to know which gang script you run.
+## Configuration highlights (`config.lua`)
 
-### Configuration
+- **`Config.Integration.gangScript`** — `'auto'` / `'rcore_gangs'` / `'standalone'`.
+- **`Config.GangData`** — per-gang models, vehicles, weapons, scenarios, combat style.
+- **`Config.StandaloneTerritories`** — name / label / owner / center / radius per
+  block (also used by the vibe layer even under rcore).
+- **`Config.WarReinforcements`** — wave schedule + `maxWarNPCs` cap.
+- **`Config.Relationships`** — gang↔gang levels (player is always neutral, set in code).
+- **`Config.AmbientSpawning`** — density by heat/time-of-day, spawn/despawn distances.
+- **Vibe tuning** lives in the `VIBE` table at the top of the street-vibe section
+  in `client.lua`: crew size, event chance, cooldowns, event weights, armed share.
 
-In `config.lua`:
+---
 
-```lua
-Config.Integration = {
-    gangScript = 'auto',  -- 'auto', 'rcore_gangs', or 'standalone'
-}
-```
+## Admin commands
 
-| Value | Behavior |
-|-------|----------|
-| `'auto'` | Detects rcore_gangs at runtime, falls back to standalone |
-| `'rcore_gangs'` | Force rcore_gangs adapter |
-| `'standalone'` | Use `Config.StandaloneTerritories` only |
+Console or `command` ace holders:
 
-### Supported Adapters
+| Command | Effect |
+|---------|--------|
+| `gangwar [zone] [attacker] [defender]` | Start a war (e.g. `gangwar davis families ballas`). Drives the bridge directly — works under standalone too, and never fabricates a real rivalry inside rcore. |
+| `gangwar_end [zone]` | End the war in a zone. |
+| `gangvibe [taunt\|driveby\|skirmish]` | Force a vibe event at *your* nearest territory (only you see it). |
 
-**rcore_gangs** — Uses `GetZoneAtPosition`, `GetGangAtZone`, `GetPlayerGang` exports. Listens to `start_rivalry`/`finish_rivalry` events for war reinforcements.
+---
 
-**standalone** — Uses hardcoded territories from `Config.StandaloneTerritories`. Good for testing or servers without a gang script.
+## How it fits together
 
-### Adding a New Adapter
+`bridge/` abstracts the gang script: the **rcore_gangs adapter** listens for
+`start_rivalry` / `finish_rivalry` and resolves zones/owners server-side; the
+**standalone adapter** uses `Config.StandaloneTerritories`. Ambient spawning and
+war waves are requested by the client but **authorized server-side** (the server
+resolves zone ownership and validates spawn requests).
 
-Create `bridge/my_gang_script.lua`, implement:
-
-```lua
--- Client
-GangBridge.GetZoneAtPosition(coords)    -- returns { name, label, center, owner } or nil
-GangBridge.GetPlayerGangClient()         -- returns { tag, name } or nil
-
--- Server
-GangBridge.GetZoneOwner(zoneName, coords) -- returns resolved gang name or nil
-GangBridge.GetPlayerGang(source)          -- returns resolved gang name or nil
-```
-
-Register war events using `GangBridge._fireWarStart(zoneName, attacker, defender)` and `GangBridge._fireWarEnd(zoneName, winner)`.
-
-Add the file to `fxmanifest.lua` shared_scripts.
-
-## Configuration
-
-### Gang Data
-
-Each gang is defined in `Config.GangData` with NPC appearance, weapons, and combat style:
-
-```lua
-Config.GangData = {
-    ['ballas'] = {
-        models = { 'g_m_y_ballaorig_01', 'g_m_y_ballasout_01' },
-        vehicles = { 'buccaneer', 'peyote', 'voodoo' },
-        weapons = { 'WEAPON_MICROSMG', 'WEAPON_PISTOL', 'WEAPON_BAT' },
-        scenarios = {
-            'WORLD_HUMAN_DRUG_DEALER',
-            'WORLD_HUMAN_HANG_OUT_STREET',
-        },
-        combatStyle = 'aggressive'  -- aggressive, defensive, balanced
-    },
-}
-```
-
-### Gang Tag Map
-
-Maps gang script tags to `Config.GangData` keys. Needed when your gang script uses uppercase or different names:
-
-```lua
-Config.GangTagMap = {
-    ['BALLAS']    = 'ballas',
-    ['VAGOS']     = 'vagos',
-    ['LOST MC']   = 'lostmc',
-}
-```
-
-### Standalone Territories
-
-When using `standalone` mode, define territories manually:
-
-```lua
-Config.StandaloneTerritories = {
-    {
-        name = 'grove_street',
-        label = 'Grove Street',
-        owner = 'families',            -- must match a Config.GangData key
-        center = vector3(-120.0, -1620.0, 34.0),
-        radius = 100.0,
-    },
-}
-```
-
-### Combat Styles
-
-| Style | Movement | Cover | Flee | Recruit |
-|-------|----------|-------|------|---------|
-| `aggressive` | Suicidal charge | No | Never | Yes |
-| `defensive` | Hold position | Yes | At 30% HP | No |
-| `balanced` | Push forward | Yes | At 20% HP | Yes |
-
-## Included Gangs
-
-| Gang | Style | Location |
-|------|-------|----------|
-| Ballas | Aggressive | Davis |
-| Vagos | Aggressive | Rancho |
-| Families | Defensive | Grove Street |
-| Triads | Balanced | Little Seoul |
-| Lost MC | Aggressive | East Vinewood |
-| Marabunta Grande | Aggressive | El Burro Heights |
-| Cartel | Balanced | Sandy Shores area |
-
-## Admin Commands
-
-| Command | Description |
-|---------|-------------|
-| `/gangai status` | Shows active NPC count and bridge adapter |
-| `/gangai spawn <gang>` | Spawns gang NPCs at your location |
-| `/gangai clear` | Removes all spawned gang NPCs |
-
-Requires `admin` permission via QBCore.
-
-## Debugging
-
-Set `Config.Debug = true` in `config.lua` to see:
-
-- Bridge adapter detection on startup
-- Zone detection when entering territories
-- NPC spawn/despawn counts
-- War start/end events
-- Recruitment triggers
-
-Check your **server console** for `[GangAI]` prefixed messages.
-
-## Performance
-
-- NPCs only spawn when players enter territory radius
-- Tiered tick rates: 100ms in combat, 500ms nearby, 2000ms distant, 5000ms background
-- Automatic cleanup of distant/dead NPCs every 60s
-- Global NPC cap (`Config.MaxSpawnedNPCs = 30`)
-- Cooldown between respawns per zone (`Config.AmbientSpawning.respawnCooldown`)
-
-## File Structure
-
-```
-dps-gangwars/
-  bridge/
-    init.lua           -- Bridge loader + shared utilities
-    rcore_gangs.lua    -- rcore_gangs adapter
-    standalone.lua     -- Standalone/fallback adapter
-  client.lua           -- NPC spawning, combat AI, relationship groups
-  server.lua           -- Spawn authorization, war reinforcements, admin commands
-  config.lua           -- All configuration
-  fxmanifest.lua       -- Resource manifest
-```
-
-## License
-
-MIT License - Free to use and modify.
+---
 
 ## Credits
 
-- **Author**: DaemonAlex
+Del Perro Sands Development. Built on the ox / Qbox stack; integrates rcore_gangs
+and wasabi_mdt.
