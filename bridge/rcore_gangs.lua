@@ -82,9 +82,15 @@ if not IsDuplicityVersion() then
 
         -- Get owner gang
         local owner = nil
-        local okOwner, gang = pcall(function()
-            return exports[RESOURCE]:GetGangAtZone(zone)
-        end)
+        -- GetGangAtZone lives behind `if IsDuplicityVersion()` in
+        -- rcore_gangs/shared/exports.lua:24, so it exists on the SERVER ONLY.
+        -- This bridge is a shared_script, so on the client the call always threw.
+        local okOwner, gang = true, nil
+        if IsDuplicityVersion() then
+            okOwner, gang = pcall(function()
+                return exports[RESOURCE]:GetGangAtZone(zone)
+            end)
+        end
 
         if not okOwner then
             LogExportError('GetGangAtZone', gang)

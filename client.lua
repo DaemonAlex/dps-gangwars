@@ -141,6 +141,9 @@ end
 -- ============================================
 
 RegisterNetEvent('gangai:client:setPlayerRelationship', function(gang)
+    -- qbx reports gangless players as the STRING 'none' - normalize to nil,
+    -- otherwise every 'is the player a rival?' check treats civilians as rivals
+    if gang == 'none' or gang == '' then gang = nil end
     playerGang = gang
 
     SetupGangRelationships()
@@ -397,7 +400,14 @@ local function SpawnGangNPC(gangName, gangData, coords, isWar)
         return nil
     end
 
-    PlaceOnGroundProperly(ped)
+    -- snap to ground: there is no ped version of PlaceObjectOnGroundProperly,
+    -- so resolve ground Z at the spawn point and place the ped on it
+    do
+        local found, groundZ = GetGroundZFor_3dCoord(spawnX, spawnY, spawnZ + 50.0, false)
+        if found then
+            SetEntityCoords(ped, spawnX, spawnY, groundZ, false, false, false, false)
+        end
+    end
 
     -- Set relationship group
     SetPedRelationshipGroupHash(ped, relationshipHash)
@@ -410,17 +420,26 @@ local function SpawnGangNPC(gangName, gangData, coords, isWar)
 
     -- Apply combat AI
     ApplyCombatAI(ped, gangData)
+    SetCanAttackFriendly(ped, false, false)  -- a gang does not shoot its own
 
     -- Assign behavior (patrol, wander, scenario) based on time of day
     local behavior = 'idle'
-    if not inCombat then
+    if isWar then
+        -- war reinforcements fight the enemy GANG, not whatever wanders past.
+        -- BlockNonTemporaryEvents stops them re-targeting players/ambient events;
+        -- the combat pump below hands them explicit enemy-gang targets.
+        SetPedFleeAttributes(ped, 0, false)
+        SetPedCombatAttributes(ped, 46, true)   -- BF_AlwaysFight
+        SetPedCombatAttributes(ped, 26, true)   -- BF_ForceCheckAttackAngleForCharge
+        SetBlockingOfNonTemporaryEvents(ped, true)
+    elseif not inCombat then
         behavior = AssignBehavior(ped, gangData, coords)
     end
 
-    -- Only mark as enemy if player is in a DIFFERENT gang (not if player has no gang)
-    if playerGang and playerGang ~= gangName then
-        SetPedAsEnemy(ped, true)
-    end
+    -- NPCs cannot know a player's affiliation by looking at them. Hostility
+    -- toward players must be EARNED (attack them and game perception reacts)
+    -- or, later, triggered by visibly wearing gang colors in rival territory
+    -- (planned mechanic). Never database-driven auto-enmity.
 
     SetModelAsNoLongerNeeded(modelHash)
 
@@ -562,7 +581,7 @@ RegisterNetEvent('gangai:client:spawnWarReinforcements', function(data)
         if warCount + spawned >= maxWar then break end
         local ped = SpawnGangNPC(data.gangName, data.gangData, data.coords, true)
         if ped then
-            TaskCombatHatedTargetsAroundPed(ped, 150.0, 0)
+            -- targeting handled by the war combat pump (explicit enemy-gang peds only)
             spawned = spawned + 1
             Wait(100)
         end
@@ -849,5 +868,508 @@ CreateThread(function()
               'ms, nearby=' .. Config.AmbientSpawning.tickRates.nearby ..
               'ms, distant=' .. Config.AmbientSpawning.tickRates.distant ..
               'ms, background=' .. Config.AmbientSpawning.tickRates.background .. 'ms')
+    end
+end)
+
+
+-- ============================================
+-- AMBIENT GUNFIGHT WITNESS REPORTS (DPS)
+-- Gang wars are rare, admin-triggered events; when this resource's own NPCs
+-- start shooting at each other (no player involved), civilians call it in.
+-- Each client reports at most once per 60s; the server dedupes across clients.
+-- ============================================
+local lastGunfightReport = 0
+CreateThread(function()
+    while true do
+        Wait(3000)
+        if GetGameTimer() - lastGunfightReport > 60000 then
+            local shooters, cx, cy, cz = 0, 0.0, 0.0, 0.0
+            for entity in pairs(spawnedNPCs) do
+                if DoesEntityExist(entity) and IsPedShooting(entity) then
+                    local c = GetEntityCoords(entity)
+                    shooters, cx, cy, cz = shooters + 1, cx + c.x, cy + c.y, cz + c.z
+                end
+            end
+            for entity in pairs(spawnedWarNPCs) do
+                if DoesEntityExist(entity) and IsPedShooting(entity) then
+                    local c = GetEntityCoords(entity)
+                    shooters, cx, cy, cz = shooters + 1, cx + c.x, cy + c.y, cz + c.z
+                end
+            end
+            if VibePeds then
+                for entity in pairs(VibePeds) do
+                    if DoesEntityExist(entity) and IsPedShooting(entity) then
+                        local c = GetEntityCoords(entity)
+                        shooters, cx, cy, cz = shooters + 1, cx + c.x, cy + c.y, cz + c.z
+                    end
+                end
+            end
+            -- two or more of our NPCs firing at once = an actual gunfight,
+            -- not a lone recruitment scuffle
+            if shooters >= 2 then
+                lastGunfightReport = GetGameTimer()
+                TriggerServerEvent('gangai:server:reportGunfight',
+                    { x = cx / shooters, y = cy / shooters, z = cz / shooters }, shooters)
+            end
+        end
+    end
+end)
+
+
+-- ============================================
+-- WAR COMBAT PUMP (DPS)
+-- Every few seconds, hand every war NPC an explicit target: the nearest living
+-- war NPC of the OTHER gang. Players are never valid targets - this is an
+-- ambient war between gangs, and bystanders stay bystanders unless they shoot
+-- first (at which point normal game perception rules apply, not our tasking).
+-- ============================================
+CreateThread(function()
+    while true do
+        Wait(3000)
+        -- bucket living war NPCs by gang
+        local byGang = {}
+        for entity, data in pairs(spawnedWarNPCs) do
+            if DoesEntityExist(entity) and not IsPedDeadOrDying(entity, true) then
+                local g = data.gangName or 'unknown'
+                byGang[g] = byGang[g] or {}
+                byGang[g][#byGang[g] + 1] = entity
+            end
+        end
+        local gangs = {}
+        for g in pairs(byGang) do gangs[#gangs + 1] = g end
+        if #gangs >= 2 then
+            for _, g in ipairs(gangs) do
+                -- enemies: every war NPC not of my gang
+                local enemies = {}
+                for _, g2 in ipairs(gangs) do
+                    if g2 ~= g then
+                        for _, e in ipairs(byGang[g2]) do enemies[#enemies + 1] = e end
+                    end
+                end
+                for _, ped in ipairs(byGang[g]) do
+                    if not IsPedInCombat(ped, 0) then
+                        local myPos, best, bestDist = GetEntityCoords(ped), nil, 1e9
+                        for _, e in ipairs(enemies) do
+                            local d = #(GetEntityCoords(e) - myPos)
+                            if d < bestDist then best, bestDist = e, d end
+                        end
+                        if best then
+                            ClearPedTasks(ped)
+                            TaskCombatPed(ped, best, 0, 16)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+
+-- ============================================
+-- STREET VIBE LAYER (DPS)
+-- Corner crews hold their territory in their colors; rivals occasionally roll
+-- through. Most encounters are theater (taunt stand-offs), some are drive-bys,
+-- few are real skirmishes. Players are civilians throughout.
+-- ============================================
+VibePeds = {}                      -- global: gunfight witness detector reads it
+local vibeCrews = {}               -- [territoryName] = { peds = {}, spots = {} }
+local vibeCooldown = {}            -- [territoryName] = next-allowed event time
+local vibeEventActive = false
+
+local VIBE = {
+    crewSpots = 2,                 -- hangout spots per territory
+    crewSize = { 3, 5 },           -- peds per spot (min, max)
+    presenceRange = 220.0,         -- player distance that keeps a territory alive
+    eventRange = 130.0,            -- player must be this close for events to fire
+    eventChance = 22,              -- % roll per minute-per-territory when in range
+    cooldown = { 240000, 480000 }, -- 4-8 min between events per territory
+    weights = { taunt = 50, driveby = 30, skirmish = 20 },
+    armedShare = 0.6,              -- share of crew carrying (concealed until provoked)
+}
+
+local TAUNTS = { 'GENERIC_INSULT_HIGH', 'GENERIC_CURSE_HIGH', 'CHALLENGE_THREATEN', 'PROVOKE_GENERIC', 'GENERIC_WHATEVER' }
+
+local function vibeLoadModel(hash)
+    if not IsModelValid(hash) then return false end
+    RequestModel(hash)
+    for _ = 1, 60 do
+        if HasModelLoaded(hash) then return true end
+        Wait(25)
+    end
+    return false
+end
+
+local function groundAt(x, y, zHint)
+    local found, z = GetGroundZFor_3dCoord(x, y, zHint + 50.0, false)
+    return found and z or zHint
+end
+
+local function spawnVibePed(gangName, gangData, x, y, z, heading)
+    local model = gangData.models[math.random(#gangData.models)]
+    local hash = GetHashKey(model)
+    if not vibeLoadModel(hash) then return nil end
+    local ped = CreatePed(4, hash, x, y, z, heading or math.random(0, 359) + 0.0, false, true)
+    SetModelAsNoLongerNeeded(hash)
+    if not DoesEntityExist(ped) then return nil end
+    SetEntityCoords(ped, x, y, groundAt(x, y, z), false, false, false, false)
+    SetPedRelationshipGroupHash(ped, GetOrCreateGangRelationship(gangName))
+    SetPedDropsWeaponsWhenDead(ped, false)
+    if math.random() < VIBE.armedShare and gangData.weapons then
+        GiveWeaponToPed(ped, GetHashKey(gangData.weapons[math.random(#gangData.weapons)]), 120, false, false)
+    end
+    ApplyCombatAI(ped, gangData)
+    -- corner crews are defensive: no AlwaysFight, so they never initiate on
+    -- police (or anyone) unless attacked first - then normal retaliation applies
+    SetPedCombatAttributes(ped, 46, false)
+    SetCanAttackFriendly(ped, false, false)  -- never target own gang, even after stray hits
+    VibePeds[ped] = { gang = gangName }
+    return ped
+end
+
+local function despawnVibePed(ped)
+    VibePeds[ped] = nil
+    if DoesEntityExist(ped) then DeleteEntity(ped) end
+end
+
+-- corner crew: cluster of peds around a spot doing corner things
+local function spawnCrew(territory)
+    local crew = { peds = {}, spots = {} }
+    if territory.style == 'stroll' then
+        -- boardwalk mode: 3 small groups, random gang each, just walking around
+        local gangNames = {}
+        for g in pairs(Config.GangData) do gangNames[#gangNames + 1] = g end
+        for grp = 1, 3 do
+            local gName = gangNames[math.random(#gangNames)]
+            local gd = Config.GangData[gName]
+            local ang = math.random() * 6.28318
+            local gx = territory.center.x + math.cos(ang) * territory.radius * 0.6
+            local gy = territory.center.y + math.sin(ang) * territory.radius * 0.6
+            local okS, safe = GetSafeCoordForPed(gx, gy, territory.center.z, true, 16)
+            local px, py, pz
+            if okS then px, py, pz = safe.x, safe.y, safe.z else px, py, pz = gx, gy, groundAt(gx, gy, territory.center.z) end
+            for i = 1, math.random(2, 3) do
+                local ped = spawnVibePed(gName, gd, px + math.random(-3, 3), py + math.random(-3, 3), pz)
+                if ped then
+                    crew.peds[#crew.peds + 1] = ped
+                    TaskWanderInArea(ped, territory.center.x, territory.center.y, territory.center.z, territory.radius * 0.8, 4.0, 8.0)
+                    Wait(50)
+                end
+            end
+        end
+        return #crew.peds > 0 and crew or nil
+    end
+    local gangData = Config.GangData[territory.owner]
+    if not gangData then return nil end
+    for s = 1, VIBE.crewSpots do
+        local ang = (s / VIBE.crewSpots) * 6.28318 + math.random() * 0.8
+        local dist = 25.0 + math.random() * (territory.radius * 0.45)
+        local sx = territory.center.x + math.cos(ang) * dist
+        local sy = territory.center.y + math.sin(ang) * dist
+        local ok, safe = GetSafeCoordForPed(sx, sy, territory.center.z, true, 16)
+        local px, py, pz
+        if ok then px, py, pz = safe.x, safe.y, safe.z else px, py, pz = sx, sy, groundAt(sx, sy, territory.center.z) end
+        crew.spots[s] = vector3(px, py, pz)
+        local n = math.random(VIBE.crewSize[1], VIBE.crewSize[2])
+        for i = 1, n do
+            local ox, oy = px + math.random(-4, 4) + math.random(), py + math.random(-4, 4) + math.random()
+            local ped = spawnVibePed(territory.owner, gangData, ox, oy, pz)
+            if ped then
+                crew.peds[#crew.peds + 1] = ped
+                if i == 1 or math.random() < 0.7 then
+                    local scen = gangData.scenarios and gangData.scenarios[math.random(#gangData.scenarios)]
+                    if scen then TaskStartScenarioInPlace(ped, scen, 0, true) end
+                else
+                    TaskWanderInArea(ped, px, py, pz, 15.0, 2.0, 4.0)
+                end
+                Wait(50)
+            end
+        end
+    end
+    return #crew.peds > 0 and crew or nil
+end
+
+local function despawnCrew(territory)
+    local crew = vibeCrews[territory.name]
+    if not crew then return end
+    for _, ped in ipairs(crew.peds) do despawnVibePed(ped) end
+    vibeCrews[territory.name] = nil
+end
+
+local function livingCrew(crew)
+    local out = {}
+    for _, p in ipairs(crew.peds) do
+        if DoesEntityExist(p) and not IsPedDeadOrDying(p, true) then out[#out + 1] = p end
+    end
+    return out
+end
+
+local function pickRivalGang(owner)
+    local names = {}
+    for g in pairs(Config.GangData) do if g ~= owner then names[#names + 1] = g end end
+    return names[math.random(#names)]
+end
+
+-- EVENT: rivals walk up, both sides yell, nobody swings. Tension theater.
+local function eventTaunt(territory, crew)
+    local rivalGang = pickRivalGang(territory.owner)
+    local rd = Config.GangData[rivalGang]
+    local spot = crew.spots[math.random(#crew.spots)]
+    local rivals = {}
+    for i = 1, math.random(2, 3) do
+        local ped = spawnVibePed(rivalGang, rd, spot.x + 25 + math.random(0, 6), spot.y + math.random(-6, 6), spot.z)
+        if ped then rivals[#rivals + 1] = ped; SetBlockingOfNonTemporaryEvents(ped, true) end
+    end
+    if #rivals == 0 then return end
+    local defenders = livingCrew(crew)
+    for _, r in ipairs(rivals) do TaskGoStraightToCoord(r, spot.x + 10.0, spot.y, spot.z, 1.0, 10000, 0.0, 0.5) end
+    Wait(8000)
+    for round = 1, 5 do
+        local a = rivals[math.random(#rivals)]
+        local b = defenders[math.random(#defenders)]
+        if a and b and DoesEntityExist(a) and DoesEntityExist(b) then
+            TaskTurnPedToFaceEntity(a, b, 1500); TaskTurnPedToFaceEntity(b, a, 1500)
+            PlayAmbientSpeechNative(a, TAUNTS[math.random(#TAUNTS)], 'SPEECH_PARAMS_FORCE_SHOUTED')
+            Wait(1800)
+            PlayAmbientSpeechNative(b, TAUNTS[math.random(#TAUNTS)], 'SPEECH_PARAMS_FORCE_SHOUTED')
+            Wait(1800)
+        end
+    end
+    Wait(2000)
+    -- sometimes the talking stops working - and dark corners embolden people
+    local escalateChance = (GetTimeOfDay() == 'night') and 35 or 25
+    if math.random(100) <= escalateChance then
+        if Config.Debug then print('[GangAI] taunt stand-off escalated to a shootout') end
+        for _, r in ipairs(rivals) do
+            if DoesEntityExist(r) and not IsPedDeadOrDying(r, true) then
+                GiveWeaponToPed(r, GetHashKey(rd.weapons and rd.weapons[1] or 'WEAPON_PISTOL'), 60, false, true)
+                local tgt = defenders[math.random(#defenders)]
+                if tgt and DoesEntityExist(tgt) then TaskCombatPed(r, tgt, 0, 16) end
+            end
+        end
+        for _, d in ipairs(livingCrew(crew)) do
+            Wait(math.random(300, 800))  -- reaction time
+            local tgt
+            for _, r in ipairs(rivals) do
+                if DoesEntityExist(r) and not IsPedDeadOrDying(r, true) then tgt = r break end
+            end
+            if tgt and DoesEntityExist(d) then ClearPedTasks(d) TaskCombatPed(d, tgt, 0, 16) end
+        end
+        Wait(math.random(15000, 25000))
+    end
+    for _, r in ipairs(rivals) do
+        if DoesEntityExist(r) and not IsPedDeadOrDying(r, true) then
+            ClearPedTasks(r)
+            TaskSmartFleeCoord(r, spot.x, spot.y, spot.z, 120.0, 20000, false, false)
+        end
+    end
+    Wait(15000)
+    for _, r in ipairs(rivals) do despawnVibePed(r) end
+    -- survivors go back to holding their corner
+    for _, d in ipairs(livingCrew(crew)) do
+        ClearPedTasks(d)
+        local scen = Config.GangData[territory.owner].scenarios
+        if scen then TaskStartScenarioInPlace(d, scen[math.random(#scen)], 0, true) end
+    end
+end
+
+-- EVENT: rival car sprays the corner and keeps rolling
+local function eventDriveBy(territory, crew)
+    local rivalGang = pickRivalGang(territory.owner)
+    local rd = Config.GangData[rivalGang]
+    local spot = crew.spots[math.random(#crew.spots)]
+    local carModel = rd.vehicles and rd.vehicles[math.random(#rd.vehicles)] or 'buccaneer'
+    local carHash = GetHashKey(carModel)
+    if not vibeLoadModel(carHash) then return end
+    -- approach from a road node ~140m out, exit through the opposite side
+    local ang = math.random() * 6.28318
+    local fromX, fromY = spot.x + math.cos(ang) * 140.0, spot.y + math.sin(ang) * 140.0
+    local okN, nodePos, nodeHeading = GetClosestVehicleNodeWithHeading(fromX, fromY, spot.z, 1, 3.0, 0)
+    if not okN then SetModelAsNoLongerNeeded(carHash) return end
+    local car = CreateVehicle(carHash, nodePos.x, nodePos.y, nodePos.z, nodeHeading, false, true)
+    SetModelAsNoLongerNeeded(carHash)
+    if not DoesEntityExist(car) then return end
+    SetVehicleDoorsLocked(car, 2)
+    local crewPeds = { }
+    for seat = -1, 1 do
+        local ped = spawnVibePed(rivalGang, rd, nodePos.x, nodePos.y, nodePos.z)
+        if ped then
+            SetPedIntoVehicle(ped, car, seat)
+            SetBlockingOfNonTemporaryEvents(ped, true)
+            if seat >= 0 then GiveWeaponToPed(ped, GetHashKey('WEAPON_MICROSMG'), 200, false, true) end
+            crewPeds[#crewPeds + 1] = ped
+        end
+    end
+    if #crewPeds == 0 then DeleteEntity(car) return end
+    local exitX, exitY = spot.x - math.cos(ang) * 200.0, spot.y - math.sin(ang) * 200.0
+    TaskVehicleDriveToCoordLongrange(crewPeds[1], car, exitX, exitY, spot.z, 22.0, 787004, 15.0)
+    local targets = livingCrew(crew)
+    CreateThread(function()
+        local fired = false
+        for _ = 1, 120 do  -- up to 60s
+            Wait(500)
+            if not DoesEntityExist(car) then break end
+            local d = #(GetEntityCoords(car) - spot)
+            if d < 55.0 and not fired then
+                fired = true
+                for i = 2, #crewPeds do
+                    local tgt = targets[math.random(#targets)]
+                    if tgt and DoesEntityExist(tgt) then
+                        TaskDriveBy(crewPeds[i], tgt, 0, 0.0, 0.0, 0.0, 80.0, 60, true, 'FIRING_PATTERN_BURST_FIRE_DRIVEBY')
+                    end
+                end
+            end
+            if fired and d > 160.0 then break end
+        end
+        Wait(4000)
+        for _, p in ipairs(crewPeds) do despawnVibePed(p) end
+        if DoesEntityExist(car) then DeleteEntity(car) end
+    end)
+end
+
+-- EVENT: it actually pops off on foot - brief, then survivors break contact
+local function eventSkirmish(territory, crew)
+    local rivalGang = pickRivalGang(territory.owner)
+    local rd = Config.GangData[rivalGang]
+    local spot = crew.spots[math.random(#crew.spots)]
+    local rivals = {}
+    for i = 1, math.random(2, 3) do
+        local ped = spawnVibePed(rivalGang, rd, spot.x + 35 + math.random(0, 8), spot.y + math.random(-8, 8), spot.z)
+        if ped then
+            rivals[#rivals + 1] = ped
+            SetBlockingOfNonTemporaryEvents(ped, true)
+            GiveWeaponToPed(ped, GetHashKey(rd.weapons and rd.weapons[1] or 'WEAPON_PISTOL'), 60, false, true)
+        end
+    end
+    if #rivals == 0 then return end
+    local defenders = livingCrew(crew)
+    for i, r in ipairs(rivals) do
+        local tgt = defenders[((i - 1) % #defenders) + 1]
+        if tgt then TaskCombatPed(r, tgt, 0, 16) end
+    end
+    for _, d in ipairs(defenders) do
+        Wait(math.random(300, 900))  -- reaction time
+        local tgt = rivals[math.random(#rivals)]
+        if DoesEntityExist(d) and tgt and DoesEntityExist(tgt) then
+            ClearPedTasks(d); TaskCombatPed(d, tgt, 0, 16)
+        end
+    end
+    Wait(math.random(20000, 35000))
+    for _, r in ipairs(rivals) do
+        if DoesEntityExist(r) and not IsPedDeadOrDying(r, true) then
+            ClearPedTasks(r)
+            TaskSmartFleeCoord(r, spot.x, spot.y, spot.z, 150.0, 25000, false, false)
+        end
+    end
+    Wait(20000)
+    for _, r in ipairs(rivals) do despawnVibePed(r) end
+    -- crew that survived goes back to holding the corner
+    for _, d in ipairs(livingCrew(crew)) do
+        ClearPedTasks(d)
+        local scen = Config.GangData[territory.owner].scenarios
+        if scen then TaskStartScenarioInPlace(d, scen[math.random(#scen)], 0, true) end
+    end
+end
+
+local function runVibeEvent(territory, crew, forced)
+    if vibeEventActive then return end
+    vibeEventActive = true
+    local roll, kind = math.random(100), 'taunt'
+    if forced then kind = forced
+    elseif roll <= VIBE.weights.skirmish then kind = 'skirmish'
+    elseif roll <= VIBE.weights.skirmish + VIBE.weights.driveby then kind = 'driveby' end
+    if Config.Debug then print('[GangAI] vibe event: ' .. kind .. ' at ' .. territory.name) end
+    local ok, err = pcall(function()
+        if kind == 'driveby' then eventDriveBy(territory, crew)
+        elseif kind == 'skirmish' then eventSkirmish(territory, crew)
+        else eventTaunt(territory, crew) end
+    end)
+    if not ok and Config.Debug then print('[GangAI] vibe event error: ' .. tostring(err)) end
+    vibeEventActive = false
+end
+
+-- main vibe loop: keep crews alive near the player, roll for events
+CreateThread(function()
+    Wait(8000)
+    while true do
+        Wait(5000)
+        if Config.StandaloneTerritories then
+            local pc = GetEntityCoords(PlayerPedId())
+            for _, territory in ipairs(Config.StandaloneTerritories) do
+                local dist = #(pc - territory.center)
+                if dist < VIBE.presenceRange and not vibeCrews[territory.name] then
+                    if Config.Debug then print('[GangAI] spawning corner crews: ' .. territory.name) end
+                    vibeCrews[territory.name] = spawnCrew(territory)
+                elseif dist > VIBE.presenceRange + 80.0 and vibeCrews[territory.name] then
+                    despawnCrew(territory)
+                end
+                local crew = vibeCrews[territory.name]
+                if crew and dist < VIBE.eventRange and territory.style ~= 'stroll' then
+                    local nextAt = vibeCooldown[territory.name] or 0
+                    if GetGameTimer() > nextAt and math.random(100) <= math.floor(VIBE.eventChance / 12) then
+                        vibeCooldown[territory.name] = GetGameTimer() + math.random(VIBE.cooldown[1], VIBE.cooldown[2])
+                        CreateThread(function() runVibeEvent(territory, crew) end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- admin demo trigger: gangvibe [taunt|driveby|skirmish]
+RegisterNetEvent('gangai:client:forceVibe', function(kind)
+    local pc = GetEntityCoords(PlayerPedId())
+    local best, bestD = nil, 1e9
+    for _, territory in ipairs(Config.StandaloneTerritories or {}) do
+        local d = #(pc - territory.center)
+        if d < bestD then best, bestD = territory, d end
+    end
+    if not best then return end
+    if not vibeCrews[best.name] then vibeCrews[best.name] = spawnCrew(best) end
+    local crew = vibeCrews[best.name]
+    if crew then CreateThread(function() runVibeEvent(best, crew, kind) end) end
+end)
+
+
+-- ============================================
+-- COP TAUNTS (DPS)
+-- Corner crews talk shit to police who roll past - face them, bark a line,
+-- and that is ALL. Hostility toward cops only ever comes from being attacked
+-- (handled by normal game retaliation, never by tasking here).
+-- ============================================
+local copTauntCooldown = {}   -- [ped] = next allowed taunt time
+local COP_GROUP = GetHashKey('COP')
+local COP_LINES = { 'GENERIC_INSULT_MED', 'GENERIC_CURSE_MED', 'GENERIC_WHATEVER', 'PROVOKE_GENERIC', 'GENERIC_DEJECTED' }
+
+CreateThread(function()
+    while true do
+        Wait(4000)
+        if next(VibePeds) then
+            -- collect nearby cop peds once per tick
+            local cops = {}
+            for _, ped in ipairs(GetGamePool('CPed')) do
+                if not IsPedAPlayer(ped) and not IsPedDeadOrDying(ped, true)
+                    and GetPedRelationshipGroupHash(ped) == COP_GROUP then
+                    cops[#cops + 1] = ped
+                end
+            end
+            if #cops > 0 then
+                local now = GetGameTimer()
+                for ped in pairs(VibePeds) do
+                    if DoesEntityExist(ped) and not IsPedDeadOrDying(ped, true)
+                        and not IsPedInCombat(ped, 0)
+                        and now > (copTauntCooldown[ped] or 0) then
+                        local myPos = GetEntityCoords(ped)
+                        for _, cop in ipairs(cops) do
+                            if #(GetEntityCoords(cop) - myPos) < 16.0 and math.random(100) <= 40 then
+                                copTauntCooldown[ped] = now + math.random(25000, 60000)
+                                TaskTurnPedToFaceEntity(ped, cop, 2000)
+                                PlayAmbientSpeechNative(ped, COP_LINES[math.random(#COP_LINES)], 'SPEECH_PARAMS_FORCE_SHOUTED')
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
     end
 end)

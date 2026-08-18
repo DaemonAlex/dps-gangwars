@@ -194,18 +194,19 @@ Config.WarReinforcements = {
 
     -- Waves of reinforcements during war
     waves = {
-        { delay = 0, count = 4 },       -- Immediate defenders
-        { delay = 30000, count = 3 },   -- 30 second reinforcement
-        { delay = 60000, count = 3 },   -- 1 minute reinforcement
-        { delay = 120000, count = 2 }   -- 2 minute final wave
+        { delay = 0, count = 8 },       -- Immediate defenders
+        { delay = 20000, count = 6 },   -- fast reinforcement
+        { delay = 60000, count = 6 },   -- 1 minute reinforcement
+        { delay = 120000, count = 4 }   -- 2 minute final wave
     },
 
     -- Spawn attackers for the attacking gang
     spawnAttackers = true,
     attackerWaves = {
-        { delay = 5000, count = 3 },
-        { delay = 45000, count = 3 },
-        { delay = 90000, count = 2 }
+        { delay = 3000, count = 8 },
+        { delay = 30000, count = 6 },
+        { delay = 75000, count = 6 },
+        { delay = 120000, count = 4 }
     }
 }
 
@@ -219,8 +220,8 @@ Config.Relationships = {
     -- 0=companion, 1=respect, 2=like, 3=neutral, 4=dislike, 5=hate
     defaultToPlayer = 3,        -- Neutral unless in rival gang
     defaultToRivals = 5,        -- Hate rival gangs
-    defaultToSameGang = 1,      -- Respect same gang members
-    defaultToPolice = 4         -- Dislike police
+    defaultToSameGang = 0,      -- Companion: same gang NEVER fight each other
+    defaultToPolice = 3         -- Neutral to police: they only fight cops who attack them
 }
 
 -- ============================================
@@ -242,7 +243,7 @@ Config.PoliceNotifyDistance = 500.0
 -- DEBUG & PERFORMANCE
 -- ============================================
 
-Config.Debug = false
+Config.Debug = true
 
 -- Maximum concurrent spawned gang NPCs (performance limit)
 Config.MaxSpawnedNPCs = 30
@@ -334,5 +335,41 @@ Config.StandaloneTerritories = {
         owner = 'lostmc',
         center = vector3(980.0, -100.0, 74.0),
         radius = 80.0,
+    },
+    {
+        name = 'chamberlain_hills',
+        label = 'Chamberlain Hills',
+        owner = 'families',
+        center = vector3(-175.0, -1571.0, 34.0),
+        radius = 110.0,
+    },
+    {
+        name = 'strawberry',
+        label = 'Strawberry',
+        owner = 'ballas',
+        center = vector3(245.0, -1735.0, 29.0),
+        radius = 110.0,
+    },
+    {
+        name = 'la_mesa',
+        label = 'La Mesa',
+        owner = 'vagos',
+        center = vector3(741.0, -1520.0, 27.0),
+        radius = 110.0,
+    },
+    {
+        name = 'cypress_flats',
+        label = 'Cypress Flats',
+        owner = 'marabunta',
+        center = vector3(835.0, -2135.0, 29.5),
+        radius = 110.0,
+    },
+    {
+        name = 'vespucci_beach',
+        label = 'Vespucci Boardwalk',
+        owner = 'mixed',            -- random gangs stroll here; nobody owns the sand
+        style = 'stroll',           -- walkers only: no corner spots, no turf events
+        center = vector3(-1669.0, -1125.0, 13.0),
+        radius = 140.0,
     },
 }

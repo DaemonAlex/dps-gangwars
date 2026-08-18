@@ -464,3 +464,110 @@ AddEventHandler('onResourceStop', function(resource)
 end)
 
 print('^2[GangAI] Server initialized — bridge mode')
+
+
+-- ============================================
+-- AMBIENT GUNFIGHT -> MDT WITNESS CALLS (DPS)
+-- Rare by design: per 200m area, at most one call per 2 minutes and
+-- three calls per fight (10 min window), escalating if fire is sustained.
+-- ============================================
+local gunfights = {}  -- ["x:y"] = { calls = n, firstAt = ms, lastAt = ms }
+
+local GUNFIGHT_DESCS = {
+    'Multiple callers reporting gunshots in the area',
+    'Caller heard a prolonged exchange of gunfire',
+    'Resident reports what sounds like automatic weapons',
+    'Several 911 calls about shots fired, callers sheltering indoors',
+}
+
+RegisterNetEvent('gangai:server:reportGunfight', function(coords, shooters)
+    if type(coords) ~= 'table' or type(coords.x) ~= 'number'
+        or type(coords.y) ~= 'number' or type(coords.z) ~= 'number' then return end
+    shooters = (type(shooters) == 'number') and shooters or 2
+
+    local key = ('%d:%d'):format(math.floor(coords.x / 200), math.floor(coords.y / 200))
+    local now = GetGameTimer()
+    local fight = gunfights[key]
+    if not fight or now - fight.firstAt > 600000 then
+        fight = { calls = 0, firstAt = now, lastAt = 0 }
+        gunfights[key] = fight
+    end
+
+    if now - fight.lastAt < 120000 then return end  -- never constant
+    if fight.calls >= 3 then return end
+    fight.lastAt = now  -- pace even when the roll below fails
+
+    -- gunfire is loud: first report almost always comes in, follow-ups often
+    local chance = (fight.calls == 0) and 90 or 65
+    if math.random(100) > chance then return end
+    fight.calls = fight.calls + 1
+
+    local sustained = fight.calls >= 2
+    local desc = GUNFIGHT_DESCS[math.random(#GUNFIGHT_DESCS)]
+        .. ((shooters >= 4) and '. Caller believes several people are involved' or '')
+        .. '. Location is approximate.'
+
+    -- sound carries: callers localize gunfire roughly, faster than a drug tip
+    local ang, dist = math.random() * 6.28318, 20.0 + math.random() * 40.0
+    local fuzzed = { x = coords.x + math.cos(ang) * dist, y = coords.y + math.sin(ang) * dist, z = coords.z }
+
+    SetTimeout(math.random(8000, 25000), function()
+        pcall(function()
+            exports['wasabi_mdt']:CreateDispatch({
+                type = 'disturbance',
+                title = sustained and '10-71 - Sustained Gunfire' or '10-71 - Shots Fired',
+                description = desc,
+                code = '10-71',
+                coords = fuzzed,
+                location = 'Approximate area - caller estimate',
+                priority = sustained and 3 or 2,
+                senderName = 'Anonymous Caller',
+            })
+        end)
+    end)
+end)
+
+
+-- ============================================
+-- ADMIN WAR TRIGGER (DPS)
+-- Console or ace 'command' holders only. Drives the same rcore rivalry
+-- events the bridge listens for, so the full chain runs: reinforcement
+-- waves -> NPC combat -> ambient gunfight witness calls to the MDT.
+--   gangwar [zone] [attacker] [defender]   e.g. gangwar davis families ballas
+--   gangwar_end [zone] [winner]
+-- ============================================
+local function resolveDefender(zone)
+    for _, territory in ipairs(Config.StandaloneTerritories or {}) do
+        if territory.name == zone then return territory.owner end
+    end
+    return 'ballas'
+end
+
+RegisterCommand('gangwar', function(source, args)
+    if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
+    local zone = args[1] or 'davis'
+    local defender = args[3] or resolveDefender(zone)
+    local attacker = args[2] or (defender == 'families' and 'ballas' or 'families')
+    print(('^3[GangAI] ADMIN war trigger: %s attacking %s at %s^7'):format(attacker, defender, zone))
+    TriggerEvent('rcore_gangs:server:start_rivalry', {
+        zone_name = zone, attacker = attacker, defender = defender,
+    })
+end, true)
+
+RegisterCommand('gangwar_end', function(source, args)
+    if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
+    local zone = args[1] or 'davis'
+    print(('^3[GangAI] ADMIN war end at %s^7'):format(zone))
+    TriggerEvent('rcore_gangs:server:finish_rivalry', {
+        zone_name = zone, winner = args[2] or resolveDefender(zone),
+    })
+end, true)
+
+
+RegisterCommand('gangvibe', function(source, args)
+    if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
+    local kind = args[1]
+    if kind ~= 'taunt' and kind ~= 'driveby' and kind ~= 'skirmish' then kind = nil end
+    print(('^3[GangAI] ADMIN vibe event trigger: %s^7'):format(kind or 'random'))
+    TriggerClientEvent('gangai:client:forceVibe', -1, kind)
+end, true)
