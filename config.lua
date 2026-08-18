@@ -196,8 +196,8 @@ Config.WarReinforcements = {
     waves = {
         { delay = 0, count = 8 },       -- Immediate defenders
         { delay = 20000, count = 6 },   -- fast reinforcement
-        { delay = 60000, count = 6 },   -- 1 minute reinforcement
-        { delay = 120000, count = 4 }   -- 2 minute final wave
+        { delay = 60000, count = 4 },   -- 1 minute reinforcement
+        { delay = 120000, count = 2 }   -- 2 min final wave (def total 20; +20 attackers = maxWarNPCs 40)
     },
 
     -- Spawn attackers for the attacking gang
@@ -205,8 +205,8 @@ Config.WarReinforcements = {
     attackerWaves = {
         { delay = 3000, count = 8 },
         { delay = 30000, count = 6 },
-        { delay = 75000, count = 6 },
-        { delay = 120000, count = 4 }
+        { delay = 75000, count = 4 },
+        { delay = 120000, count = 2 }
     }
 }
 
@@ -243,7 +243,7 @@ Config.PoliceNotifyDistance = 500.0
 -- DEBUG & PERFORMANCE
 -- ============================================
 
-Config.Debug = true
+Config.Debug = false
 
 -- Maximum concurrent spawned gang NPCs (performance limit)
 Config.MaxSpawnedNPCs = 30

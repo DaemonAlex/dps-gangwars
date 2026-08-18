@@ -80,30 +80,13 @@ if not IsDuplicityVersion() then
         local zoneName = zone.name or zone.label or 'unknown'
         local center = ComputeZoneCenter(zone)
 
-        -- Get owner gang
+        -- Owner is intentionally nil on the client: rcore's GetGangAtZone is
+        -- server-only (behind `if IsDuplicityVersion()` in rcore's exports) and
+        -- this function runs client-side. Ownership is resolved authoritatively
+        -- server-side in gangai:server:requestAmbientSpawn from the zone name,
+        -- so the client never needs it here. (This block previously sat inside a
+        -- client-only guard and was statically dead, silently nil-ing owner.)
         local owner = nil
-        -- GetGangAtZone lives behind `if IsDuplicityVersion()` in
-        -- rcore_gangs/shared/exports.lua:24, so it exists on the SERVER ONLY.
-        -- This bridge is a shared_script, so on the client the call always threw.
-        local okOwner, gang = true, nil
-        if IsDuplicityVersion() then
-            okOwner, gang = pcall(function()
-                return exports[RESOURCE]:GetGangAtZone(zone)
-            end)
-        end
-
-        if not okOwner then
-            LogExportError('GetGangAtZone', gang)
-        elseif gang then
-            -- rcore returns a gang table with a 'tag' field
-            local rawTag = nil
-            if type(gang) == 'table' then
-                rawTag = gang.tag or gang.name or gang.label
-            elseif type(gang) == 'string' then
-                rawTag = gang
-            end
-            owner = GangBridge.ResolveGangName(rawTag)
-        end
 
         return {
             name = zoneName,

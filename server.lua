@@ -472,6 +472,7 @@ print('^2[GangAI] Server initialized — bridge mode')
 -- three calls per fight (10 min window), escalating if fire is sustained.
 -- ============================================
 local gunfights = {}  -- ["x:y"] = { calls = n, firstAt = ms, lastAt = ms }
+local gunfightReporterCooldown = {}  -- [src] = next allowed report time
 
 local GUNFIGHT_DESCS = {
     'Multiple callers reporting gunshots in the area',
@@ -481,9 +482,24 @@ local GUNFIGHT_DESCS = {
 }
 
 RegisterNetEvent('gangai:server:reportGunfight', function(coords, shooters)
+    local src = source
     if type(coords) ~= 'table' or type(coords.x) ~= 'number'
         or type(coords.y) ~= 'number' or type(coords.z) ~= 'number' then return end
+    -- reject non-finite/out-of-world coords: nan/inf pass the number check but
+    -- crash ('%d'):format(math.floor(...)) and let a crafted client error the handler
+    if coords.x ~= coords.x or coords.y ~= coords.y
+        or math.abs(coords.x) > 20000 or math.abs(coords.y) > 20000 then return end
+    -- per-reporter rate limit: the client scanner legitimately reports at most
+    -- once / 60s, so anything faster is a modified client trying to spam the MDT
+    local nowSrc = GetGameTimer()
+    if nowSrc - (gunfightReporterCooldown[src] or 0) < 30000 then return end
+    gunfightReporterCooldown[src] = nowSrc
     shooters = (type(shooters) == 'number') and shooters or 2
+
+    -- prune stale per-cell records (>10 min) so gunfights can't grow unbounded
+    for k, f in pairs(gunfights) do
+        if nowSrc - f.firstAt > 600000 then gunfights[k] = nil end
+    end
 
     local key = ('%d:%d'):format(math.floor(coords.x / 200), math.floor(coords.y / 200))
     local now = GetGameTimer()
@@ -546,21 +562,26 @@ end
 RegisterCommand('gangwar', function(source, args)
     if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
     local zone = args[1] or 'davis'
-    local defender = args[3] or resolveDefender(zone)
-    local attacker = args[2] or (defender == 'families' and 'ballas' or 'families')
+    local rawDef = args[3] or resolveDefender(zone)
+    local rawAtk = args[2] or (rawDef == 'families' and 'ballas' or 'families')
+    local defender = GangBridge and GangBridge.ResolveGangName(rawDef)
+    local attacker = GangBridge and GangBridge.ResolveGangName(rawAtk)
+    if not defender or not attacker or defender == attacker then
+        print(('^1[GangAI] gangwar: could not resolve both gangs (attacker=%s defender=%s). Zone "%s" may be unowned/mixed - pass gangs explicitly: gangwar <zone> <attacker> <defender>^7'):format(tostring(rawAtk), tostring(rawDef), zone))
+        return
+    end
     print(('^3[GangAI] ADMIN war trigger: %s attacking %s at %s^7'):format(attacker, defender, zone))
-    TriggerEvent('rcore_gangs:server:start_rivalry', {
-        zone_name = zone, attacker = attacker, defender = defender,
-    })
+    -- drive OUR war system straight through the bridge: works under the
+    -- standalone adapter too, and never spoofs rcore's internal rivalry event
+    -- (which could start a real persistent rivalry in the third-party script)
+    GangBridge._fireWarStart(zone, attacker, defender)
 end, true)
 
 RegisterCommand('gangwar_end', function(source, args)
     if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
     local zone = args[1] or 'davis'
     print(('^3[GangAI] ADMIN war end at %s^7'):format(zone))
-    TriggerEvent('rcore_gangs:server:finish_rivalry', {
-        zone_name = zone, winner = args[2] or resolveDefender(zone),
-    })
+    GangBridge._fireWarEnd(zone, args[2] and GangBridge.ResolveGangName(args[2]) or nil)
 end, true)
 
 
@@ -569,5 +590,7 @@ RegisterCommand('gangvibe', function(source, args)
     local kind = args[1]
     if kind ~= 'taunt' and kind ~= 'driveby' and kind ~= 'skirmish' then kind = nil end
     print(('^3[GangAI] ADMIN vibe event trigger: %s^7'):format(kind or 'random'))
-    TriggerClientEvent('gangai:client:forceVibe', -1, kind)
+    -- only the admin who ran it sees the demo (was -1: spawned crews at EVERY
+    -- player's nearest territory, often km away, then raced the despawn loop)
+    TriggerClientEvent('gangai:client:forceVibe', source ~= 0 and source or -1, kind)
 end, true)
