@@ -14,13 +14,13 @@ unless you make yourself a target.
 ## Features
 
 ### Street vibe layer
-Each configured territory, when a player is nearby, spawns a **corner crew** — a
-few gang members in that gang's models doing corner things (dealing, smoking,
-leaning), most of them concealed-armed. Cross a couple of streets and the colors
-change.
+Ten territories — two per gang (Families, Ballas, Vagos, Marabunta, Triads) plus
+the Lost clubhouse — hold **corner crews**: 3–5 peds per spot in that gang's
+models running corner scenarios (dealing, smoking, leaning), ~60% concealed-armed.
+Cross a couple of streets and the colors change.
 
-Occasionally (rare by design — a per-territory cooldown of several minutes) a
-crew rolls an **event**:
+Occasionally (rare by design — a 4–8 minute per-territory cooldown) a crew rolls
+an **event**:
 
 | Event | Weight | What happens |
 |-------|--------|--------------|
@@ -56,9 +56,11 @@ phantom call at their midpoint.
 
 - **Gangs fight gangs. Players are civilians.** There is no database-driven
   enmity — an NPC cannot know your affiliation by looking at you. The player is
-  always neutral to every gang group. (A "wear colors in rival turf → recognized"
-  mechanic is planned; it will be *earned* hostility, never automatic.)
-- **Same gang never fights itself.**
+  always neutral to every gang group, and qbx's gangless string `'none'` is
+  normalized rather than treated as a gang. (A "wear colors in rival turf →
+  recognized" mechanic is planned; it will be *earned* hostility, never automatic.)
+- **Same gang never fights itself** (companion relationship + `SetCanAttackFriendly`
+  false on every spawn path).
 - **Cops get lip, not lead** — never attacked unless they attack first.
 - **Events are rare.** Atmosphere, not a constant war zone.
 
@@ -117,6 +119,22 @@ Console or `command` ace holders:
 **standalone adapter** uses `Config.StandaloneTerritories`. Ambient spawning and
 war waves are requested by the client but **authorized server-side** (the server
 resolves zone ownership and validates spawn requests).
+
+---
+
+## Notable implementation details
+
+Worth knowing before editing the spawn paths — each of these was a real bug:
+
+- `PlaceOnGroundProperly` is **not a real native** (only the object version exists);
+  ground-snap goes through `GetGroundZFor_3dCoord`. This silently killed every
+  spawn upstream.
+- `TaskCombatHatedTargetsAroundPed` is one-shot and targets *players*; the combat
+  pump assigns explicit `TaskCombatPed` targets instead.
+- Putting a ped **into** a gang relationship group makes membership drive
+  relationships regardless of PLAYER-hash settings — which is why the player ped
+  is never placed in one.
+- Set `Config.Debug = false` for production (it is off by default).
 
 ---
 
