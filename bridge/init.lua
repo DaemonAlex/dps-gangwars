@@ -101,6 +101,8 @@ function GangBridge.ResolveGangName(rawName)
     if not rawName then return nil end
 
     local lower = rawName:lower()
+    -- 'none'/'' are qbx's gangless sentinels, not a gang - never resolve them
+    if lower == 'none' or lower == '' then return nil end
     -- Direct match
     if Config.GangData[lower] then
         return lower
