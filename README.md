@@ -1,6 +1,6 @@
 # dps-gangwars
 
-Ambient gang AI for **Del Perro Sands**. Turns quiet gang territories into places
+Ambient gang AI for **DelPerroSands**. Turns quiet gang territories into places
 that feel lived-in and dangerous — corner crews holding their blocks, rivals
 rolling through, the occasional drive-by or shoot-out — and drives large
 reinforcement wars on top of [rcore_gangs](https://rcore.store) rivalries. Every
@@ -122,5 +122,5 @@ resolves zone ownership and validates spawn requests).
 
 ## Credits
 
-Del Perro Sands Development. Built on the ox / Qbox stack; integrates rcore_gangs
+DelPerroSands Development. Built on the ox / Qbox stack; integrates rcore_gangs
 and wasabi_mdt.
