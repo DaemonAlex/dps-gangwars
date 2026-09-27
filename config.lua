@@ -329,13 +329,13 @@ Config.StandaloneTerritories = {
         center = vector3(-700.0, -900.0, 19.0),
         radius = 100.0,
     },
-    {
-        name = 'lost_clubhouse',
-        label = 'Lost MC Clubhouse',
-        owner = 'lostmc',
-        center = vector3(980.0, -100.0, 74.0),
-        radius = 80.0,
-    },
+-- REMOVED(track conflict):     {
+-- REMOVED(track conflict):         name = 'lost_clubhouse',
+-- REMOVED(track conflict):         label = 'Lost MC Clubhouse',
+-- REMOVED(track conflict):         owner = 'lostmc',
+-- REMOVED(track conflict):         center = vector3(980.0, -100.0, 74.0),
+-- REMOVED(track conflict):         radius = 80.0,
+-- REMOVED(track conflict):     },
     {
         name = 'chamberlain_hills',
         label = 'Chamberlain Hills',
@@ -363,6 +363,29 @@ Config.StandaloneTerritories = {
         owner = 'marabunta',
         center = vector3(835.0, -2135.0, 29.5),
         radius = 110.0,
+    },
+    -- DPS 2026-09-27 (Damon: "the Yellow Jack is a gang hangout… crawling with biker activity… bikers and
+    -- rednecks and dust ups"): a hangout, not a corner. Crews cluster on the lot by their bikes and trucks,
+    -- thick after dark, thin by day; the usual event is a dust-up between two of them, fists only.
+    {
+        name = 'yellow_jack',
+        label = 'Yellow Jack Inn',
+        owner = 'lostmc',
+        center = vector3(1998.04, 3054.68, 47.06),   -- /spot yj-lot #179
+        radius = 40.0,
+        style = 'hangout',
+        hangout = {
+            models = { 'g_m_y_lost_01', 'g_m_y_lost_02', 'g_m_y_lost_03', 'g_f_y_lost_01',
+                       'a_m_m_hillbilly_01', 'a_m_m_hillbilly_02', 'a_m_m_rurmeth_01', 'a_m_y_salton_01', 'a_m_m_salton_04' },
+            scenarios = { 'WORLD_HUMAN_DRINKING', 'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_LEANING', 'WORLD_HUMAN_HANG_OUT_STREET', 'WORLD_HUMAN_STAND_MOBILE' },
+            nightHours = { 18, 5 },
+            spots = { night = 3, day = 1 },
+            size = { night = { 3, 5 }, day = { 2, 3 } },
+            spread = { 4.0, 16.0 },                   -- how far the clusters sit from the centre (m)
+            vehicles = { 'daemon', 'hexer', 'zombie', 'rebel', 'sadler' },
+            vehicleCount = { night = 3, day = 1 },
+            weights = { taunt = 35, dustup = 50, driveby = 5, skirmish = 10 },
+        },
     },
     {
         name = 'vespucci_beach',

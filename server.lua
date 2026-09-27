@@ -588,7 +588,7 @@ end, true)
 RegisterCommand('gangvibe', function(source, args)
     if source ~= 0 and not IsPlayerAceAllowed(source, 'command') then return end
     local kind = args[1]
-    if kind ~= 'taunt' and kind ~= 'driveby' and kind ~= 'skirmish' then kind = nil end
+    if kind ~= 'taunt' and kind ~= 'driveby' and kind ~= 'skirmish' and kind ~= 'dustup' then kind = nil end
     print(('^3[GangAI] ADMIN vibe event trigger: %s^7'):format(kind or 'random'))
     -- only the admin who ran it sees the demo (was -1: spawned crews at EVERY
     -- player's nearest territory, often km away, then raced the despawn loop)

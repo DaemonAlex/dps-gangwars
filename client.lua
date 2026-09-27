@@ -1020,8 +1020,78 @@ local function despawnVibePed(ped)
     if DoesEntityExist(ped) then DeleteEntity(ped) end
 end
 
+-- DPS 2026-09-27: hangout crews (Yellow Jack). Clusters around the lot by parked bikes and trucks,
+-- sized by the hour, models mixed from the territory's own list (bikers + rednecks).
+local function hangoutIsNight(h)
+    local hour = GetClockHours()
+    local from, to = h.nightHours[1], h.nightHours[2]
+    if from <= to then return hour >= from and hour < to end
+    return hour >= from or hour < to
+end
+
+local function spawnHangoutVehicle(model, x, y, z, heading)
+    local hash = GetHashKey(model)
+    if not vibeLoadModel(hash) then return nil end
+    local veh = CreateVehicle(hash, x, y, z, heading, false, true)
+    SetModelAsNoLongerNeeded(hash)
+    if not DoesEntityExist(veh) then return nil end
+    SetVehicleOnGroundProperly(veh)
+    SetVehicleDoorsLocked(veh, 2)
+    SetVehicleEngineOn(veh, false, true, true)
+    SetEntityAsMissionEntity(veh, true, true)
+    return veh
+end
+
+local function spawnHangout(territory)
+    local h = territory.hangout
+    if not h then return nil end
+    local gangData = Config.GangData[territory.owner]
+    if not gangData then return nil end
+    local pool = { models = h.models or gangData.models, weapons = gangData.weapons, scenarios = h.scenarios or gangData.scenarios, combatStyle = gangData.combatStyle }
+    local night = hangoutIsNight(h)
+    local spots = night and h.spots.night or h.spots.day
+    local size = night and h.size.night or h.size.day
+    local vehCount = night and h.vehicleCount.night or h.vehicleCount.day
+    local crew = { peds = {}, spots = {}, vehicles = {} }
+    local c = territory.center
+    -- bikes and trucks first, around the centre, so the clusters form next to them
+    for v = 1, vehCount do
+        local ang = (v / vehCount) * 6.28318 + math.random() * 0.6
+        local dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
+        local vx, vy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        local veh = spawnHangoutVehicle(h.vehicles[math.random(#h.vehicles)], vx, vy, groundAt(vx, vy, c.z), math.random(0, 359) + 0.0)
+        if veh then crew.vehicles[#crew.vehicles + 1] = veh end
+        Wait(50)
+    end
+    for s = 1, spots do
+        local ang = (s / spots) * 6.28318 + math.random() * 0.8
+        local dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
+        local sx, sy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        local ok, safe = GetSafeCoordForPed(sx, sy, c.z, true, 16)
+        local px, py, pz
+        if ok and #(vector3(safe.x, safe.y, safe.z) - c) < territory.radius then px, py, pz = safe.x, safe.y, safe.z
+        else px, py, pz = sx, sy, groundAt(sx, sy, c.z) end
+        crew.spots[s] = vector3(px, py, pz)
+        for i = 1, math.random(size[1], size[2]) do
+            local ox, oy = px + math.random(-3, 3) + math.random(), py + math.random(-3, 3) + math.random()
+            local ped = spawnVibePed(territory.owner, pool, ox, oy, pz, math.deg(math.atan(py - oy, px - ox)) - 90.0)
+            if ped then
+                crew.peds[#crew.peds + 1] = ped
+                if math.random() < 0.8 then
+                    TaskStartScenarioInPlace(ped, pool.scenarios[math.random(#pool.scenarios)], 0, true)
+                else
+                    TaskWanderInArea(ped, px, py, pz, 8.0, 3.0, 6.0)
+                end
+                Wait(50)
+            end
+        end
+    end
+    return #crew.peds > 0 and crew or nil
+end
+
 -- corner crew: cluster of peds around a spot doing corner things
 local function spawnCrew(territory)
+    if territory.style == 'hangout' then return spawnHangout(territory) end
     local crew = { peds = {}, spots = {} }
     if territory.style == 'stroll' then
         -- boardwalk mode: 3 small groups, random gang each, just walking around
@@ -1082,6 +1152,11 @@ local function despawnCrew(territory)
     if not crew then return end
     if type(crew) == 'table' and crew.peds then
         for _, ped in ipairs(crew.peds) do despawnVibePed(ped) end
+    end
+    if type(crew) == 'table' and crew.vehicles then
+        for _, veh in ipairs(crew.vehicles) do
+            if DoesEntityExist(veh) then DeleteEntity(veh) end
+        end
     end
     vibeCrews[territory.name] = nil
 end
@@ -1272,17 +1347,75 @@ local function eventSkirmish(territory, crew)
     end
 end
 
+-- EVENT (DPS 2026-09-27): dust-up. Two of the crew get in each other's faces, shove, swing,
+-- fists only, twenty seconds, then it's over and everyone goes back to their drink.
+local function eventDustup(territory, crew)
+    local living = livingCrew(crew)
+    if #living < 2 then return end
+    local a = living[math.random(#living)]
+    local b
+    for _ = 1, 6 do b = living[math.random(#living)]; if b ~= a then break end end
+    if not b or b == a then return end
+    local keepA, keepB = GetSelectedPedWeapon(a), GetSelectedPedWeapon(b)
+    for _, p in ipairs({ a, b }) do
+        ClearPedTasks(p)
+        RemoveAllPedWeapons(p, true)
+        SetCanAttackFriendly(p, true, false)
+        SetPedCombatAttributes(p, 5, true)   -- can fight armed peds when unarmed
+        SetPedCombatAttributes(p, 46, true)  -- always fight (for the next twenty seconds)
+    end
+    TaskTurnPedToFaceEntity(a, b, 1500)
+    TaskTurnPedToFaceEntity(b, a, 1500)
+    PlayPedAmbientSpeechNative(a, TAUNTS[math.random(#TAUNTS)], 'SPEECH_PARAMS_FORCE_SHOUTED')
+    Wait(1600)
+    PlayPedAmbientSpeechNative(b, TAUNTS[math.random(#TAUNTS)], 'SPEECH_PARAMS_FORCE_SHOUTED')
+    Wait(1200)
+    TaskCombatPed(a, b, 0, 16)
+    Wait(math.random(400, 900))
+    TaskCombatPed(b, a, 0, 16)
+    -- the rest of the crew crowds in to watch
+    for _, p in ipairs(living) do
+        if p ~= a and p ~= b and DoesEntityExist(p) and math.random() < 0.5 then
+            ClearPedTasks(p)
+            TaskGoToEntity(p, a, -1, 4.0 + math.random() * 2.0, 1.5, 0, 0)
+        end
+    end
+    Wait(math.random(14000, 22000))
+    local od = Config.GangData[territory.owner]
+    local scen = (territory.hangout and territory.hangout.scenarios) or (od and od.scenarios)
+    for _, p in ipairs({ a, b }) do
+        if DoesEntityExist(p) and not IsPedDeadOrDying(p, true) then
+            ClearPedTasks(p)
+            SetPedCombatAttributes(p, 46, false)
+            SetCanAttackFriendly(p, false, false)
+            PlayPedAmbientSpeechNative(p, 'GENERIC_WHATEVER', 'SPEECH_PARAMS_FORCE')
+        end
+    end
+    if DoesEntityExist(a) and keepA and keepA ~= GetHashKey('WEAPON_UNARMED') then GiveWeaponToPed(a, keepA, 60, false, false) end
+    if DoesEntityExist(b) and keepB and keepB ~= GetHashKey('WEAPON_UNARMED') then GiveWeaponToPed(b, keepB, 60, false, false) end
+    Wait(2000)
+    for _, p in ipairs(living) do
+        if DoesEntityExist(p) and not IsPedDeadOrDying(p, true) and scen then
+            ClearPedTasks(p)
+            TaskStartScenarioInPlace(p, scen[math.random(#scen)], 0, true)
+        end
+    end
+end
+
 local function runVibeEvent(territory, crew, forced)
     if vibeEventActive then return end
     vibeEventActive = true
+    local w = (territory.hangout and territory.hangout.weights) or VIBE.weights
     local roll, kind = math.random(100), 'taunt'
     if forced then kind = forced
-    elseif roll <= VIBE.weights.skirmish then kind = 'skirmish'
-    elseif roll <= VIBE.weights.skirmish + VIBE.weights.driveby then kind = 'driveby' end
+    elseif roll <= (w.skirmish or 0) then kind = 'skirmish'
+    elseif roll <= (w.skirmish or 0) + (w.driveby or 0) then kind = 'driveby'
+    elseif roll <= (w.skirmish or 0) + (w.driveby or 0) + (w.dustup or 0) then kind = 'dustup' end
     if Config.Debug then print('[GangAI] vibe event: ' .. kind .. ' at ' .. territory.name) end
     local ok, err = pcall(function()
         if kind == 'driveby' then eventDriveBy(territory, crew)
         elseif kind == 'skirmish' then eventSkirmish(territory, crew)
+        elseif kind == 'dustup' then eventDustup(territory, crew)
         else eventTaunt(territory, crew) end
     end)
     if not ok and Config.Debug then print('[GangAI] vibe event error: ' .. tostring(err)) end
