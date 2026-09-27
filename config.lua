@@ -379,11 +379,14 @@ Config.StandaloneTerritories = {
                        'a_m_m_hillbilly_01', 'a_m_m_hillbilly_02', 'a_m_m_rurmeth_01', 'a_m_y_salton_01', 'a_m_m_salton_04' },
             scenarios = { 'WORLD_HUMAN_DRINKING', 'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_LEANING', 'WORLD_HUMAN_HANG_OUT_STREET', 'WORLD_HUMAN_STAND_MOBILE' },
             nightHours = { 18, 5 },
-            spots = { night = 3, day = 1 },
-            size = { night = { 3, 5 }, day = { 2, 3 } },
+            spots = { night = 3, day = 3 },           -- DPS: full strength all day for now (Damon 2026-09-27)
+            size = { night = { 3, 5 }, day = { 3, 5 } },
             spread = { 4.0, 16.0 },                   -- how far the clusters sit from the centre (m)
-            vehicles = { 'daemon', 'hexer', 'zombie', 'rebel', 'sadler' },
-            vehicleCount = { night = 3, day = 1 },
+            -- DPS 2026-09-27 Damon: "have the npc use custom bikes from the vehicles list" — addon choppers from the
+            -- live registry (cruisers category) plus two county trucks for the rednecks.
+            vehicles = { 'lpchopper', 'lpchopper2', 'hellspawn', 'slayer', 'bigdude', 'zombiev8', 'chimerac', 'crucero',
+                         'desperado', 'snbladec', 'sombrero', 'daemon2', 'hexer', 'rebel', 'sadler' },
+            vehicleCount = { night = 3, day = 3 },
             weights = { taunt = 35, dustup = 50, driveby = 5, skirmish = 10 },
         },
     },
