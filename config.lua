@@ -385,7 +385,8 @@ Config.StandaloneTerritories = {
             -- DPS 2026-09-27 Damon: "have the npc use custom bikes from the vehicles list" — addon choppers from the
             -- live registry (cruisers category) plus two county trucks for the rednecks.
             vehicles = { 'lpchopper', 'lpchopper2', 'hellspawn', 'slayer', 'bigdude', 'zombiev8', 'chimerac', 'crucero',
-                         'desperado', 'snbladec', 'sombrero', 'daemon2', 'hexer', 'rebel', 'sadler' },
+                         'desperado', 'snbladec', 'sombrero', 'stockholm', 'chesterfield', 'saltflat', 'lpbagger', 'lpbagger2',
+                         'bisonn', 'starfighter', 'sm-sanctus', 'nightblade2', 'daemon2', 'hexer', 'rebel', 'sadler' },
             vehicleCount = { night = 3, day = 3 },
             weights = { taunt = 35, dustup = 50, driveby = 5, skirmish = 10 },
         },
