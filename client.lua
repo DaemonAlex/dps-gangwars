@@ -989,8 +989,17 @@ local function vibeLoadModel(hash)
 end
 
 local function groundAt(x, y, zHint)
-    local found, z = GetGroundZFor_3dCoord(x, y, zHint + 50.0, false)
+    -- DPS 2026-09-27 (Damon: "dude on the roof"): probe from just above the lot, not from 50 m up, or a point over
+    -- the bar's footprint comes back at roof height.
+    local found, z = GetGroundZFor_3dCoord(x, y, zHint + 2.0, false)
     return found and z or zHint
+end
+
+-- true when (x, y) sits at lot level: within 2 m of the territory centre height and not over a roof or a wall
+local function onLotLevel(x, y, c)
+    local found, z = GetGroundZFor_3dCoord(x, y, c.z + 2.0, false)
+    if not found then return false end
+    return math.abs(z - c.z) < 2.0
 end
 
 local function spawnVibePed(gangName, gangData, x, y, z, heading)
@@ -1059,6 +1068,11 @@ local function spawnHangout(territory)
         local ang = (v / vehCount) * 6.28318 + math.random() * 0.6
         local dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
         local vx, vy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        for _ = 1, 6 do
+            if onLotLevel(vx, vy, c) then break end
+            ang = math.random() * 6.28318; dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
+            vx, vy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        end
         local veh = spawnHangoutVehicle(h.vehicles[math.random(#h.vehicles)], vx, vy, groundAt(vx, vy, c.z), math.random(0, 359) + 0.0)
         if veh then crew.vehicles[#crew.vehicles + 1] = veh end
         Wait(50)
@@ -1067,13 +1081,19 @@ local function spawnHangout(territory)
         local ang = (s / spots) * 6.28318 + math.random() * 0.8
         local dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
         local sx, sy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        for _ = 1, 6 do
+            if onLotLevel(sx, sy, c) then break end
+            ang = math.random() * 6.28318; dist = h.spread[1] + math.random() * (h.spread[2] - h.spread[1])
+            sx, sy = c.x + math.cos(ang) * dist, c.y + math.sin(ang) * dist
+        end
         local ok, safe = GetSafeCoordForPed(sx, sy, c.z, true, 16)
         local px, py, pz
-        if ok and #(vector3(safe.x, safe.y, safe.z) - c) < territory.radius then px, py, pz = safe.x, safe.y, safe.z
+        if ok and #(vector3(safe.x, safe.y, safe.z) - c) < territory.radius and math.abs(safe.z - c.z) < 2.0 then px, py, pz = safe.x, safe.y, safe.z
         else px, py, pz = sx, sy, groundAt(sx, sy, c.z) end
         crew.spots[s] = vector3(px, py, pz)
         for i = 1, math.random(size[1], size[2]) do
             local ox, oy = px + math.random(-3, 3) + math.random(), py + math.random(-3, 3) + math.random()
+            if not onLotLevel(ox, oy, c) then ox, oy = px, py end
             local ped = spawnVibePed(territory.owner, pool, ox, oy, pz, math.deg(math.atan(py - oy, px - ox)) - 90.0)
             if ped then
                 crew.peds[#crew.peds + 1] = ped
