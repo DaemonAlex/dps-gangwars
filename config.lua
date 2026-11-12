@@ -379,9 +379,15 @@ Config.StandaloneTerritories = {
                        'a_m_m_hillbilly_01', 'a_m_m_hillbilly_02', 'a_m_m_rurmeth_01', 'a_m_y_salton_01', 'a_m_m_salton_04' },
             scenarios = { 'WORLD_HUMAN_DRINKING', 'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_LEANING', 'WORLD_HUMAN_HANG_OUT_STREET', 'WORLD_HUMAN_STAND_MOBILE' },
             nightHours = { 18, 5 },
-            spots = { night = 3, day = 3 },           -- DPS: full strength all day for now (Damon 2026-09-27)
-            size = { night = { 3, 5 }, day = { 3, 5 } },
+            spots = { night = 2, day = 2 },           -- DPS 2026-10-31 (Damon: "way too many gang member at the yellow jack, 4-6 should be enough in groups"): was 3 clusters of 3-5 = 9-15. Now 2 clusters of 2-3 = 4-6, still in groups.
+            size = { night = { 2, 3 }, day = { 2, 3 } },
             spread = { 4.0, 16.0 },                   -- how far the clusters sit from the centre (m)
+            -- DPS 2026-10-31 (Damon: "motor cycles are spawning in inside the yellow jack"). The code now
+            -- rejects any spot inside a building interior, which should be enough on its own. This circle is
+            -- the backstop if the bar is a plain shell with no interior to detect. Centred on the one point
+            -- verified to be indoors - the bartender position from the crowds keepOut (Damon 2026-09-27) -
+            -- with a radius that covers the building. If a bike still lands inside, /spot it and I will adjust.
+            keepOut = { { pos = vector3(1983.45, 3049.82, 47.21), radius = 12.0 } },
             -- DPS 2026-09-27 Damon: "have the npc use custom bikes from the vehicles list" — addon choppers from the
             -- live registry (cruisers category) plus two county trucks for the rednecks.
             -- DPS 2026-10-25 fleet cut: chimerac, crucero, lpbagger, sm-sanctus, nightblade2 removed from the list
